@@ -124,3 +124,13 @@ docs/plan/milestones.md
 
 # internal handoff doc, never push
 docs/_internal/
+
+# ---------- third-party / vendored repos ----------
+# AutoVLA upstream clone (ucla-mobility/AutoVLA). Local edits are tracked
+# via patch files under docs/_internal/patches/ (gitignored too).
+# DO NOT add this directory to git — it contains a separate repo + 16GB ckpt.
+code/third_party/
+
+# ---------- launch scripts (contain absolute /apdcephfs paths, not for public push) ----------
+# Internal copies live in docs/_internal/scripts_internal/
+scripts/

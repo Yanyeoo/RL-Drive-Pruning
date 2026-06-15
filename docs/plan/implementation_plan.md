@@ -50,8 +50,10 @@ M5 Stage B: Budget Policy RL  (Q4.3.b R3 Pareto reward)
 M6 Evaluation & Ablations  (Q5)
    ├─ 7 baselines × navtest main table (ratio=0.5)
    ├─ Pareto curve figure
-   ├─ A1–A10 ablations
-   └─ navhard robustness analysis
+   └─ A1–A10 ablations
+   ─────────────────────────────────────────────────────
+   Note: navhard robustness analysis 已降级为 future work
+         （详见 design_decisions.md 文末 Revision 2026-06-15）
 ```
 
 ---
@@ -87,36 +89,91 @@ M6 Evaluation & Ablations  (Q5)
 ### M0.1 环境
 - [ ] AutoVLA repo clone + 环境装齐（复用 `envs/navsim`，增量装 trl/peft）
 - [ ] 单帧 inference < 5s sanity check
-- [ ] 双 H20 推理脚本就位（参考 prior-work 的 `run_oracle_navhard_dual_gpu.sh` 模式）
+- [ ] 双 H20 推理脚本就位（参考 prior-work 的 `run_oracle_navhard_dual_gpu.sh` 模式，但目标 split 改为 navtest）
 
 ### M0.2 数据切分（Q4.4）
 - [ ] navtrain 列表 dump
 - [ ] **probe set A**：从 navtrain 按 nav_cmd stratified 抽 100 scene（直/左/右/掉头各 25），存 `data/splits/probe_100.pkl`
 - [ ] **train pool**: navtrain \ A，按 90/10 random split → `train.pkl` / `val.pkl`
-- [ ] navtest / navhard 列表存 `data/splits/navtest.pkl` / `navhard.pkl`
+- [ ] navtest 列表存 `data/splits/navtest.pkl`
+- [ ] ~~navhard 列表~~（已降级为 future work，Revision 2026-06-15）
 
-### M0.3 NAVSIM pipeline
-- [ ] AutoVLA 接入 NAVSIM submission pipeline（参考 prior-work 的 submission generation 脚本）
-- [ ] EPDMS evaluator 单元测试
-- [ ] 子项分数（collision / comfort / progress）抽取脚本（Q5.a 主表用）
+### M0.3 NAVSIM pipeline 接入（MA2 — navtest baseline 接入）
 
-### M0.4 Baseline 全量跑
-- [ ] navtrain 全量 r=1.0 inference → per-scene EPDMS + 4 子项 + FLOPs/latency
-- [ ] 存到 `results/baseline_r1.0_navtrain.pkl`（key=scene_id, val=dict）
-- [ ] navtest r=1.0 → `results/baseline_r1.0_navtest.pkl`
-- [ ] navhard r=1.0 → `results/baseline_r1.0_navhard.pkl`
+> **事实层接入地图**：见 `docs/plan/MA2_navtest_baseline_integration_map.md`
+> （Revision 2026-06-15 17:20：原 M0.3 + M0.4 合并展开为 MA2.1–MA2.5；命名延续 deprecated `milestones.md` MA2 标签，便于沟通追溯）
+
+**关键发现**：AutoVLA 自带 navsim fork 已经把 navtest 评估入口接好 90%，**MA2 不是"接入"而是"补 2 项预处理 + 包双卡 dispatcher + 全量跑"**。
+
+#### MA2.1 — navtest_nocot JSON preprocessing
+- [ ] 摸清 `code/third_party/AutoVLA/tools/preprocessing/nocot_sample_generation.py` 输入输出
+- [ ] 写启动脚本对 navtest split 生成预处理 json
+- [ ] 输出落到 `data/navtest_nocot/{token}.json`
+- **验收**：`ls data/navtest_nocot | wc -l` ≈ navtest token 总数（~12k）
+- **工作量**：半天写 + 1–3 h 跑
+- **对应接入地图**：§4.2
+
+#### MA2.2 — navtest metric_cache build
+- [ ] 用 `navsim/scripts/evaluation/run_metric_caching.sh train_test_split=navtest` 跑
+- [ ] 输出落到 `exp/metric_cache_navtest/`，建立软链/复用约定
+- **验收**：metric_cache 目录每 token 一个 `.xz`，能被 `MetricCacheLoader` 加载
+- **工作量**：0.5 h 写 + 0.5–2 h 跑
+- **对应接入地图**：§4.1
+
+#### MA2.3 — 双 H20 dispatcher + 环境变量
+- [ ] 写 `scripts/run_autovla_navtest_dual_gpu.sh`：
+  - export 4 个 NAVSIM/OPENSCENE/NUPLAN/EXP 环境变量
+  - token list 按 hash 一切二
+  - 两条 `run_pdm_score_cot.py` 并行，各占一卡（`CUDA_VISIBLE_DEVICES=0/1`）
+  - 收尾 merge per-worker csv
+- [ ] 修掉 AutoVLA 模板 sh 的 `$./config` typo（C1）
+- [ ] 把 Qwen base path 在 hydra override 里改成绝对路径（C5）
+- **验收**：dispatcher 起来不报路径错，能见到两条 worker log 同时输出
+- **工作量**：半天
+- **对应接入地图**：§4.3、§4.4、§5 C1/C5
+
+#### MA2.4 — Smoke run（5 scene）
+- [ ] 取 navtest 头 5 个 token 跑 dispatcher
+- [ ] 实测：单帧时延、显存峰值、CoT 失败率、trajectory decode 成功率
+- [ ] 验证 C3（速度）、C7（CoT decode）两个风险点（~~C4~~ 2026-06-15 17:30 已解除：ckpt 是 Lightning full-FT，非 lora）
+- **验收**：5 token 全部出 EPDMS 子项；外推全量耗时 ≤ 36 h（双卡）
+- **工作量**：半天 + 1 h 跑
+- **对应接入地图**：§5 C3/C7（C4 已划掉）
+
+#### MA2.5 — navtest 全量跑（**M0 的 B0 数字**）
+- [ ] 全量双卡 navtest inference
+- [ ] 落地 `results/baseline_r1.0_navtest.pkl`（key=scene_id, val=dict）
+- [ ] 落地 `docs/journal/MA2_b0_navtest.md`：EPDMS + 4 子项 + 单帧时延 + token 数 + CoT 失败率
+- [ ] ~~navhard r=1.0~~（已降级，Revision 2026-06-15）
+- **验收**：navtest EPDMS 数值；预期 0.45–0.65；止损线 < 0.41
+- **工作量**：8–24 h 挂机（speed 取决于 MA2.4 实测）
+
+### M0.4 navtrain Baseline 全量跑
+> Revision 2026-06-15 17:20：M0.4 只保留 navtrain 那一份 baseline。navtest baseline 已移入 MA2.5。
+
+- [ ] navtrain \ probe 全量 r=1.0 inference → per-scene EPDMS + 4 子项 + FLOPs/latency
+  - **复用 MA2.3 的 dispatcher**，只换 `train_test_split=navtrain` 和 token list 来源
+- [ ] 落到 `results/baseline_r1.0_navtrain.pkl`（key=scene_id, val=dict）
+- [ ] ~~navhard r=1.0~~（已降级，Revision 2026-06-15）
+
+> **算力优化提示**：M1.b 也要 navtrain 全量 inference 一遍（只多 dump attention），**M0.4 与 M1.b 应合并为一次跑**，省 1× navtrain 算力。详见 M1.b 备注。
 
 ## M0 验收
-- [ ] EPDMS_baseline (navtest) 数值；预期 0.45–0.65
+- [ ] **MA2 接入完成**：dispatcher 可复用、navtest_nocot / metric_cache 就位（MA2.1–MA2.3）
+- [ ] **B0 数**：navtest EPDMS（MA2.5 产出）；预期 0.45–0.65
 - [ ] **止损线**：navtest EPDMS < prior-work ceiling (≈0.41) → 重评估骨干
-- [ ] 单 token 推理时延 + token 数（FLOPs reference）记录在 `docs/journal/M0_baseline.md`
+- [ ] navtrain baseline 数（M0.4）就位，供 M1/M2 advantage 计算用
+- [ ] 单 token 推理时延 + token 数（FLOPs reference）记录在 `docs/journal/MA2_b0_navtest.md`
 
 ## M0 产物
 | 产物 | 路径 |
 |---|---|
-| Splits | `data/splits/{probe_100, train, val, navtest, navhard}.pkl` |
-| Baseline EPDMS | `results/baseline_r1.0_{navtrain, navtest, navhard}.pkl` |
-| Inference timing | `docs/journal/M0_baseline.md` |
+| Splits | `data/splits/{probe_100, train, val, navtest}.pkl` |
+| navtest_nocot json（MA2.1） | `data/navtest_nocot/{token}.json` |
+| navtest metric_cache（MA2.2） | `exp/metric_cache_navtest/` |
+| 双卡 dispatcher（MA2.3，可复用） | `scripts/run_autovla_navtest_dual_gpu.sh` |
+| Baseline EPDMS | `results/baseline_r1.0_{navtrain, navtest}.pkl` |
+| Inference timing / B0 报告 | `docs/journal/MA2_b0_navtest.md` |
 
 ---
 
@@ -371,23 +428,22 @@ M6 Evaluation & Ablations  (Q5)
 | A6 | ε_quality sensitivity | 复用 M3.b 数据 |
 | A7 | α/β reward sensitivity | 复用 M5.a 数据 |
 | A8 | EPDMS sub-component breakdown | 主表自带 |
-| A9 | navhard performance | 跑全部 7 baseline 在 navhard 上 |
+| ~~A9~~ | ~~navhard performance~~ | 降级为 future work（Revision 2026-06-15） |
 | A10 | FastV-selector-at-input (= baseline 4) | 复用 |
 
-**只有 A2 (B5) 和 A9 (navhard) 需要新跑**，其他 8 个全部复用前面 milestone 数据。
+**只有 A2 (B5) 需要新跑**，其他 8 个全部复用前面 milestone 数据（A9 已移除）。
 
 ## M6 产物
 | 产物 | 路径 |
 |---|---|
 | Main table CSV | `results/M6_main_table.csv` |
 | Pareto figure | `results/M6_pareto.pdf` |
-| Ablation tables | `results/M6_ablation_{A1..A10}.csv` |
-| navhard results | `results/M6_navhard.csv` |
+| Ablation tables | `results/M6_ablation_{A1..A8, A10}.csv`（A9 navhard 已降级） |
 
 ## M6 验收
 - [ ] Ours RL-Drive Full 在 navtest ratio=0.5 列 EPDMS 击败所有其他 baseline
 - [ ] Pareto curve Ours dominate
-- [ ] navhard ratio=0.5 EPDMS ≥ baseline ratio=0.5 EPDMS
+- [ ] ~~navhard ratio=0.5 EPDMS ≥ baseline ratio=0.5 EPDMS~~（A9 已降级，Revision 2026-06-15）
 
 ---
 

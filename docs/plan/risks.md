@@ -13,7 +13,7 @@
 |---|---|---|---|
 | [R-M0-1](#r-m0-1) | M0 | NAVSIM pipeline 在 AutoVLA 上跑不通 | 🔴 |
 | [R-M0-2](#r-m0-2) | M0 | AutoVLA r=1.0 baseline EPDMS 远低于论文报告值 | 🔴 |
-| [R-M0-3](#r-m0-3) | M0 | navtrain stage_one cache 缺失/格式不兼容 | 🟡 |
+| [R-M0-3](#r-m0-3) | M0 | ~~navtrain stage_one cache 缺失/格式不兼容~~（已关闭，Revision 2026-06-15）| ⚪ |
 | [R-M1a-1](#r-m1a-1) | M1a | 没有任何 ViT 层的 attention 与 EPDMS 显著相关 | 🔴 |
 | [R-M1b-1](#r-m1b-1) | M1b | 全量 attention 提取磁盘/显存爆炸 | 🟡 |
 | [R-M1c-1](#r-m1c-1) | M1c | LambdaRank scorer 在 val 上 NDCG ≈ random | 🔴 |
@@ -27,7 +27,7 @@
 | [R-M5-1](#r-m5-1) | M5 | GRPO α/β grid 全部 dominated by SFT | 🟡 |
 | [R-M5-2](#r-m5-2) | M5 | piecewise Pareto reward 数值不稳 / clip 频繁触发 | 🟢 |
 | [R-M6-1](#r-m6-1) | M6 | 主表 iso-compute 列输给 FastV / ToMe | 🔴 |
-| [R-M6-2](#r-m6-2) | M6 | navhard 上方法严重退化（OOD 不 robust） | 🟡 |
+| [R-M6-2](#r-m6-2) | M6 | ~~navhard 上方法严重退化（OOD 不 robust）~~（已关闭，Revision 2026-06-15）| ⚪ |
 | [R-D-1](#r-d-1) | Design | attention-distill 假设根本不成立 | 🔴 |
 | [R-D-2](#r-d-2) | Design | two-stage（importance × budget）联合训练崩溃 | 🟡 |
 | [R-D-3](#r-d-3) | Design | M0 oracle headroom 在 AutoVLA 上 ≪ prior work 的 +0.07 | 🔴 |
@@ -43,25 +43,27 @@
 
 **失败现象**
 - AutoVLA forward 接进 NAVSIM `run_pdm_score_from_submission.py` 后报 shape / dtype / interface mismatch
-- 或 stage_two closed-loop 无法调用 AutoVLA 的 action head
+- 或 navtest open-loop 评估无法调用 AutoVLA 的 action head
 
 **诊断方法**
-1. 先用 prior work 已 patched 的 NAVSIM glue 代码当 reference（`/apdcephfs/private_shayladeng/tokenrl/code/navsim/...`）
+1. 先用 prior work 已 patched 的 NAVSIM glue 代码当 reference（内部仓库下的 `code/navsim/...`）
 2. 单帧 forward 走通后再 batch
-3. 用 r=1.0（无剪枝）跑通 5 scene 的 stage_two，确认 trajectory 输出格式与 NAVSIM 期望一致
+3. 用 r=1.0（无剪枝）跑通 5 scene 的 navtest 评估，确认 trajectory 输出格式与 NAVSIM 期望一致
 
 **Contingency**
 - **Plan A（首选）**：参考 prior work 的 9 处适配 patch（`docs/_internal/handoff.md` §映射表有路径），逐处 port 到 AutoVLA wrapper
 - **Plan B**：把 AutoVLA 的 trajectory 输出格式封装成 ReCogDrive submission.pkl 兼容格式，**复用 prior work 的 NAVSIM eval 入口**（牺牲一点优雅度换稳定）
-- **Plan C（最后兜底）**：放弃 navhard_two_stage closed-loop，改用 navtest open-loop EPDMS 作为主 metric，但需在 paper §4.1 写明并附 OL→CL 相关性论证
+- **Plan C（最后兜底）**：换 backbone（LMDrive / OmniDrive），M0 重做
+
+> 关联 Revision 2026-06-15：原 Plan C "改用 navtest" 已成为主路径，不再是兜底。
 
 ---
 
 ### <a id="r-m0-2"></a>R-M0-2 🔴 AutoVLA r=1.0 baseline EPDMS 远低于论文报告值
 
 **失败现象**
-- AutoVLA paper 报告 navhard EPDMS ≈ 0.45+，但本地复现 < 0.30
-- 且不是 stage_one cv 占位拖累（已扣除）
+- AutoVLA paper 报告 navtest EPDMS ≈ 0.45+，但本地复现 < 0.30
+- 不是 split / 评测脚本差异（已统一到 navtest open-loop，Revision 2026-06-15）
 
 **诊断方法**
 1. 检查 ckpt 是否对：HuggingFace 的 official AutoVLA ckpt vs 训练自己的；mismatch 概率最高
@@ -70,24 +72,17 @@
 4. 跑 5 个 scene 的可视化对比 GT，看 trajectory 是不是质量本身就差
 
 **Contingency**
-- **Plan A**：联系 AutoVLA 作者 / Issues 区确认 navhard 评测脚本（很多 paper 报的是 navtest）
-- **Plan B**：接受 AutoVLA 本地复现值作为新 baseline，paper 中明确"reproduced under NAVSIM v2"，所有方法都基于这个 baseline 增量比较，不与论文原值横向对比
+- **Plan A**：联系 AutoVLA 作者 / Issues 区确认 navtest 评测脚本与 ckpt 版本对应关系
+- **Plan B**：接受 AutoVLA 本地复现值作为新 baseline，paper 中明确"reproduced under NAVSIM v1 navtest"，所有方法都基于这个 baseline 增量比较，不与论文原值横向对比
 - **Plan C（致命兜底）**：换 backbone 到 LMDrive 或 OmniDrive（开源且评测脚本清晰），design 不变
 
 ---
 
-### <a id="r-m0-3"></a>R-M0-3 🟡 navtrain stage_one cache 缺失/格式不兼容
+### <a id="r-m0-3"></a>R-M0-3 ⚪ ~~navtrain stage_one cache 缺失/格式不兼容~~（已关闭）
 
-**失败现象**
-- navtrain 全量 EPDMS 跑 oracle 时，stage_one closed-loop pre-rollout cache 不存在或格式与 navhard 的不一样
+**关闭原因**：Revision 2026-06-15 主评测从 navhard_two_stage 改为 navtest open-loop，不再依赖 stage_one closed-loop pre-rollout cache。本风险整条作废。
 
-**诊断方法**
-1. `ls $NAVSIM_EXP_ROOT/metric_cache_navtrain/` 看是否存在
-2. 抽 1 个 token 进 stage_one runner，看是否能直接 hit cache
-
-**Contingency**
-- **Plan A**：自己跑一遍 navtrain 的 stage_one cv（参考 prior work `compute_navtrain_metric_cache.sh`），约 8 GPU·hour
-- **Plan B**：navtrain 也用 stage1 占位（与 prior work 06-01 同口径），但需在 §3.4 注明 oracle label 受占位影响，并报告 navhard 上的 ablation 验证 ranking 一致性
+> 历史失败现象（仅作存档）：navtrain 全量 EPDMS 跑 oracle 时，stage_one closed-loop pre-rollout cache 不存在或格式不一致。Contingency 已无需触发。
 
 ---
 
@@ -254,7 +249,7 @@
 ### <a id="r-m4-1"></a>R-M4-1 🟡 val_acc 高但 EPDMS 不涨
 
 **失败现象**
-- budget_policy_v1 val_acc 0.7+，但 navhard 上 adaptive EPDMS ≤ best fixed-r
+- budget_policy_v1 val_acc 0.7+，但 navtest 上 adaptive EPDMS ≤ best fixed-r
 - ⚠️ 这正是 prior work v3 的失败模式（acc 0.6 但 collapse 到一类）
 
 **诊断方法**
@@ -318,18 +313,12 @@
 
 ---
 
-### <a id="r-m6-2"></a>R-M6-2 🟡 navhard 上严重退化
+### <a id="r-m6-2"></a>R-M6-2 ⚪ ~~navhard 上严重退化~~（已关闭）
 
-**失败现象**
-- 在 navtest 主表赢，但 navhard（OOD）上比 fixed-r baseline 差
+**关闭原因**：Revision 2026-06-15 navhard 评测降级为 future work。本风险整条作废。
 
-**诊断方法**
-- 看 navhard 哪类场景退化最重（cluster by weather / city / traffic density）
-
-**Contingency**
-- **Plan A**：M3 oracle generation 加进 navhard 的小 subset 一起训
-- **Plan B**：navhard 结果作为 limitation 写进 §6 discussion，主表 navtest 站得住即可
-- **Plan C**：训一个 navhard-specific budget head（小代价，1 epoch）
+> 历史 contingency 三案（Plan A 加 navhard subset / Plan B 写 limitation / Plan C 训 navhard-specific head）均不适用。
+> 如未来 future work 阶段重新评测 navhard，可参考此条复活的诊断方法（按 weather / city / traffic density 分桶分析）。
 
 ---
 
@@ -455,3 +444,7 @@ R-M2-1 / R-M2-2  ──► RL 是否必要（可降级 ablation）
 ## 维护日志
 
 - 2026-06-14 19:30 created（risks v1，覆盖 M0–M6 + Design + Ops 共 23 条）
+- 2026-06-15 16:50 Revision: Benchmark 切换 navhard_two_stage → navtest（详见 design_decisions.md 文末 Revision 段落）。本次变更：
+  - R-M0-3 关闭（navtest 不依赖 stage_one cache）
+  - R-M6-2 关闭（不再评测 navhard）
+  - R-M0-1 / R-M0-2 / R-M4-1 描述中的 navhard 字眼改为 navtest

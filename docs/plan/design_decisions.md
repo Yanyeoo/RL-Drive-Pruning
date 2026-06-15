@@ -12,7 +12,7 @@
 - 项目：RL-Drive (AutoVLA backbone + vision token pruning + GRPO)
 - 关联旧工作：a prior internal scorer-based driving pipeline (referred to as **prior work** below)，已停止迭代
 - 开始日期：2026-06-14
-- Benchmark：NAVSIM navhard_two_stage（open-loop EPDMS）
+- Benchmark：**NAVSIM navtest（open-loop EPDMS）**  ← Revision 2026-06-15（原 navhard_two_stage，详见文末 Revision 记录）
 
 ## 决策进度总览
 
@@ -527,7 +527,7 @@ Stage B RL (Budget Policy fine-tune):
 | **A. Probe set** | navtrain 子集（独立切出） | 100 scene | layer probing (Q4.1)、ε scan (Q4.2.b)、α/β scan (Q4.3.d) |
 | **B. Oracle 数据集** | navtrain \ A | 全量 | Stage A attention 提取 + Stage B oracle EPDMS 跑分 |
 | **C. RL 数据集** | navtrain \ A | 全量（= B） | Stage A/B GRPO rollout |
-| **D. 评测集** | navtest / navhard | 既定 | 最终 EPDMS 报数 |
+| **D. 评测集** | navtest（主报）/ navhard（future work，见文末 Revision 2026-06-15） | 既定 | 最终 EPDMS 报数 |
 
 #### 决策
 
@@ -537,7 +537,7 @@ Stage B RL (Budget Policy fine-tune):
 | **Q4.4.b B 与 C 是否同批** | **(i) B = C = navtrain \ A** | oracle 是 NAVSIM 物理仿真 ground truth，非 fitted parameter，无 leakage |
 | **Q4.4.c Train/val 切分** | **(ii) 90/10 random split** | 给 SFT early stopping 和 RL model selection 用 |
 | **Q4.4.d SFT/RL 是否共用 val** | **(i) 共用同一 val** | 消除 distribution shift，SFT loss 与 RL reward 在同一基准比 |
-| **Q4.4.e 评测集** | **(iii) 主报 navtest + ablation 报 navhard** | 主表对齐社区主流；navhard 在 Analysis 章节体现 robustness |
+| **Q4.4.e 评测集** | **主报 navtest（navhard 列入 future work）** | AutoVLA 原生不支持 navhard 双路径范式；详见文末 Revision 2026-06-15 |
 
 #### 数据切分理由（paper Experimental Setup 直接取用）
 
@@ -551,7 +551,9 @@ Stage B RL (Budget Policy fine-tune):
 > 共用同一个 validation set 是非常好的 engineering habit。这样在看 Stage A (SFT) 的 val loss 和 Stage B (RL) 的 val reward 时，是在完全相同的分布基准上做对比，消除了一切 data distribution shift 带来的干扰。
 
 **Q4.4.e — 评测呈现策略**
-> 这是最聪明的 paper 写作策略。主表格报 navtest，保证和 FastV、ToMe 以及其他 AutoVLA baseline 绝对公平可比，堵住 reviewer 挑刺的嘴；然后在 Ablation / Analysis 章节丢出 navhard 的结果，证明 pruning policy 在 corner cases（动态博弈、复杂路况）下依然坚挺，把 robustness 的故事讲圆。
+> 主表格报 navtest，保证和 FastV、ToMe 以及其他 AutoVLA baseline 绝对公平可比，堵住 reviewer 挑刺的嘴。
+>
+> ⚠️ **Revision 2026-06-15**：原计划 ablation 章节加 navhard robustness 数据，但因 AutoVLA 上游 navsim fork 不原生支持 navhard_two_stage 双路径评估范式（详见文末 Revision 段落），navhard 数据降级为 future work。在 paper 中可在 §Limitation/Future work 一笔带过，主表 navtest 站得住即可。
 
 #### 最终数据流图
 
@@ -571,10 +573,10 @@ Stage B RL (Budget Policy fine-tune):
    α/β scan (Q4.3.d)       SFT + RL    (SFT early stop
                           (B = C 同一批)  + RL model select)
 
-                    navtest (主报)     navhard (ablation)
+                    navtest (主报)     navhard (future work)
                           │                  │
                           ▼                  ▼
-                  Main table EPDMS    Robustness analysis
+                  Main table EPDMS    [Revision 2026-06-15: 见文末]
 ```
 
 #### Reject 的方案
@@ -585,9 +587,9 @@ Stage B RL (Budget Policy fine-tune):
 - **(iv) probe diversity clustering**：实现复杂，nav_cmd stratify 已足够
 - **(i) train/val 不切**：缺 model selection / early stopping 信号
 - **(ii) SFT/RL 独立 val split**：引入 distribution shift，两阶段对比不可信
-- **(i) navtest only**：缺 robustness 故事
 - **(ii) navhard only**：与社区主流脱钩，无法与 FastV/ToMe 直接对比
 - **(iv) navtest + navhard 全报**：稀释 main result，evaluator 容易混乱
+- **(v) 主报 navtest + ablation 报 navhard**：原计划方案，因 AutoVLA 不原生支持 navhard 已降级（Revision 2026-06-15）
 
 ---
 
@@ -595,7 +597,7 @@ Stage B RL (Budget Policy fine-tune):
 
 ### 设计理念
 - 评测体系是 paper credibility 的根基。Q5 的目标：**让 reviewer 无处挑刺**
-- 主轴策略：**主报 navtest（社区主流，公平对比）+ ablation 报 navhard（robustness 故事）**（详见 Q4.4.e）
+- 主轴策略：**主报 navtest（社区主流，公平对比）**（详见 Q4.4.e；navhard ablation 已降级为 future work，见文末 Revision 2026-06-15）
 - 评测不堆砌、不模糊：每个 baseline、每个 ablation 都对应回答一个明确的 reviewer 问题
 
 ### 决策
@@ -672,10 +674,11 @@ Stage B RL (Budget Policy fine-tune):
 | **A6** | ε_quality sensitivity ({0.005, 0.01, 0.02, 0.05}) | label rule 健壮？ | Q4.2.b | 复用 ε scan 数据 |
 | **A7** | α/β reward sensitivity grid | reward 健壮？ | Q4.3.d | 复用 α/β scan 数据 |
 | **A8** | EPDMS sub-component breakdown | 哪个子项受影响？ | Q5.a | 主表自带 |
-| **A9** | navhard performance | 复杂场景 robust？ | Q4.4.e | 直接跑 |
+| ~~**A9**~~ | ~~navhard performance~~ | 复杂场景 robust？ | Q4.4.e | 降级为 future work（Revision 2026-06-15）|
 | **A10** | FastV-selector-at-input | selector 自身 gain？拆 "位置 gain vs selector gain" | Q4.2 末尾 | 已是 baseline 4 |
 
 > A5–A10 都是 Q1–Q4 里已经埋好的伏笔（ε scan、α/β scan、layer probing 本来就要做），ablation table 把这些数据 surface 出来即可，**几乎没有额外算力开销**。CVPR/NeurIPS 一篇好 paper 通常 10+ ablations 表格。
+> ⚠️ **Revision 2026-06-15**：A9 navhard performance 已降级为 future work，剩余 9 个 ablation (A1–A8, A10) 全部保留。
 
 ### Reject 的方案
 - **(i) Only EPDMS for main metric**：reviewer 必问 collision，不拆子项就被挑
@@ -688,3 +691,50 @@ Stage B RL (Budget Policy fine-tune):
 - **(iii) Multiple tables across ratios**：信息冗余，Pareto curve 已涵盖
 - **(i) Ablations A1–A4 only**：A5–A10 数据已经在跑，不 surface 浪费
 - **(iii) A1–A4 + 选 3–4 个**：取舍标准模糊，不如全做
+
+---
+
+## Revision 记录
+
+### Revision 2026-06-15: Benchmark 切换 navhard_two_stage → navtest
+
+**触发**
+
+AutoVLA 上游 navsim fork（基于 navsim v1.x，CVPR 2024 challenge 时期）原生**不支持** navhard_two_stage 双路径 + reactive synthetic 评估范式：
+- `default_evaluation.yaml` 只有单一 `sensor_blobs_path`（无 `synthetic_sensor_path` / `original_sensor_path`）
+- `SceneLoader` 不区分 stage1（真实 log 图像）与 stage2（合成图像）
+- 全代码库零字眼匹配 `navhard / two_stage / synthetic_sensor / reactive_synthetic`
+- 上游官方评估目标本身就是 `navtest`（见 `default_run_pdm_score.yaml override train_test_split: navtest`）
+
+要让 AutoVLA 跑 navhard，需 patch SceneLoader / merge sensor 目录 / port 双路径机制（参考 prior work `tokenrl/code/third_party/navsim` 的 v2 实现），属于框架级改造，超出本项目核心 scope（vision token pruning method），且引入大量与 method 无关的工程债。
+
+**决策**
+
+主评测改为 **navtest**（AutoVLA 原生支持，0 改造），navhard 评测降级为 **future work**：
+- 主表（M6 main table）EPDMS 全部基于 navtest
+- 数据切分：仅 `navtrain` + `navtest`，**不再下载 `navhard_two_stage` (~? GB)**
+- M0 baseline、M3 oracle generation、M6 ablation 全部对齐 navtest
+
+**Future work 的 navhard 入口**（保留但不在本轮跑）：
+- 若需要补 navhard 数字，可复用 prior-work 内部仓库下的 navsim v2 完整实现（已含双路径 SceneLoader、navhard_two_stage split 配置、`run_navhard_4gpu.sh` 评估脚本）
+- 接入路径：让 AutoVLA inference wrapper 输出 ReCogDrive submission.pkl 兼容格式，复用 prior work 的 NAVSIM v2 eval entry（即原 R-M0-1 Plan B 路线）
+
+**影响**
+
+| 模块 | 变化 |
+|---|---|
+| `implementation_plan.md` M0 | 删 `baseline_r1.0_navhard.pkl` 产物；splits 不再含 `navhard.pkl` |
+| `implementation_plan.md` M6 | 删 ablation A9 (navhard performance)；产物表删 `M6_navhard.csv` |
+| `risks.md` R-M0-3 | 关闭（navtest 不需要 stage1 cv cache） |
+| `risks.md` R-M6-2 | 关闭（不再评测 navhard） |
+| `risks.md` R-M0-1 / R-M0-2 / R-M4-1 | 失败现象描述里的 `navhard` 字眼改为 `navtest` |
+| `design_decisions.md` Q4.4.e | 由 "主报 navtest + ablation 报 navhard" 简化为 "主报 navtest（navhard 列入 future work）" |
+| 配置文件 | `qwen2.5-vl-3B-navhard.yaml` 删除 / 重命名为 `qwen2.5-vl-3B-navtest.yaml`，sensor 路径改回单 `sensor_blobs/test` |
+
+**Reject 的方案**
+- **A1**：给 AutoVLA navsim 打补丁强行支持 navhard —— 改造量大、与 method 无关、易引入 silent bug
+- **A2**：把 AutoVLA 的 PYTHONPATH 切到 prior work 的 navsim v2 —— 风险中等但 import 拓扑改动大，且 AutoVLA 上游升级时合并冲突高
+- **A3**：合并 sensor 目录 hack —— 能跑但脏，paper 里说不清
+- **A4**：换 backbone（LMDrive / OmniDrive 原生支持 navhard）—— 推迟整体进度过多，且失去 AutoVLA 这个 SOTA 对标点
+
+**论证**：navtest 在社区主流中仍是公平可比的标准 benchmark（FastV / ToMe / 各 AutoVLA 衍生工作均以 navtest 为主报），不影响 paper main claim 的 reviewer 接受度。

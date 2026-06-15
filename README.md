@@ -103,7 +103,7 @@ bash code/scripts/eval_navtest_vanilla.sh   # TBD
 
 | # | Milestone | Output | Status |
 |---|-----------|--------|--------|
-| **M0** | VLA baseline replication on NAVSIM (navtest, navhard) | EPDMS upper bound, FLOPs/latency reference | ⏳ |
+| **M0** | VLA baseline replication on NAVSIM (navtest) | EPDMS upper bound, FLOPs/latency reference | ⏳ |
 | **M1** | Layer probing + attention extraction for distillation labels | per-layer ranking labels for navtrain \ A | ⏳ |
 | **M2** | Stage A — Importance Scorer SFT (LambdaRank on attention) | scorer-v1 checkpoint | ⏳ |
 | **M3** | B3 Pareto-aware oracle: per-scene optimal keep-ratio | budget labels for navtrain \ A | ⏳ |
@@ -120,7 +120,7 @@ Full plan with compute budget, deliverable paths, and risk gates: [`docs/plan/im
 - **Backbone**: AutoVLA (Qwen2.5-VL-3B family) — frozen during all RL-Drive training.
 - **Benchmark**: NAVSIM (open-loop EPDMS).
   - Main results: **navtest** (community-standard split, fair vs FastV / ToMe / AutoVLA).
-  - Robustness analysis: **navhard** (corner cases, complex interactions).
+  - **navhard** evaluation: deferred to future work — AutoVLA's upstream navsim fork does not natively support the navhard_two_stage two-path / reactive-synthetic protocol; revisiting it would require porting prior-work's navsim-v2 SceneLoader. See `docs/plan/design_decisions.md` Revision 2026-06-15 for full rationale.
 - **Metric battery** (per Q5.a/b):
   - Quality: EPDMS, collision rate, comfort, progress.
   - Efficiency: avg kept ratio, FLOPs (vision forward), wall-clock latency.
@@ -149,4 +149,4 @@ See [`LICENSE`](LICENSE). All rights are reserved while the paper is under submi
 
 ---
 
-*Last updated: 2026-06-14*
+*Last updated: 2026-06-15*

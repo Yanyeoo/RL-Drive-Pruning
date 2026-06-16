@@ -64,6 +64,7 @@ RL-Drive/
 │   │   ├── implementation_plan.md  ← M0–M6 milestones, compute budget, deliverables
 │   │   ├── milestones.md           ← (DEPRECATED — early draft, kept for history)
 │   │   └── ...
+│   ├── results/                    ← 📊 single source of truth for headline numbers (key_results.md)
 │   ├── journal/                    ← daily journals
 │   └── reports/                    ← per-milestone reports
 ├── data/                           ← (gitignored) datasets, mounted at runtime

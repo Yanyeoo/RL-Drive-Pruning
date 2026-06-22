@@ -1,0 +1,36 @@
+# Hydra agent config for M1.a attention capture.
+# Drop-in replacement for navsim/.../agent/autovla_agent.yaml — same fields
+# plus the four attention_* knobs.
+#
+# Usage (after chain_complete + scripts wire-up):
+#   PYTHONPATH must include code/ so `_target_` resolves to rldrive.*
+#   override: agent=rldrive/autovla_with_attention  (or full _target_ path)
+#
+_target_: rldrive.agents.autovla_with_attention.AutoVLAWithAttentionAgent
+_convert_: 'all'
+
+trajectory_sampling:
+  _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+  _convert_: 'all'
+  time_horizon: 5
+  interval_length: 0.5
+
+lora_conf:
+  use_lora: null
+  task_type: CAUSAL_LM
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+  r: 8
+  lora_alpha: 8
+  lora_dropout: 0.1
+  bias: "none"
+
+checkpoint_path: null
+sensor_data_path: null
+config_path: null
+
+# ---- M1.a attention capture ----
+attention_enabled: true
+attention_layer_idx: 14           # mid of 28 layers; sweep in M1.a probe
+attention_save_dir: null           # absolute path; runner script must fill in
+attention_average_heads: true      # store (N_vision,); set false for per-head probe
+attention_assert_qlen: true        # fail loud if pre-fill chunked

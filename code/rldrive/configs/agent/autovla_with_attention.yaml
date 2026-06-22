@@ -34,3 +34,12 @@ attention_layer_idx: 14           # mid of 28 layers; sweep in M1.a probe
 attention_save_dir: null           # absolute path; runner script must fill in
 attention_average_heads: true      # store (N_vision,); set false for per-head probe
 attention_assert_qlen: true        # fail loud if pre-fill chunked
+
+# ---- M1.b Level-0 head mask (off by default) ----
+# Dict {layer_idx: [head_idx, ...]}. None or {} -> zero hooks, bit-identical
+# to upstream. See docs/specs/m1b_freelunch_spec.md for variant definitions.
+# Example overrides (hydra CLI):
+#   '+agent.head_mask_layers={12: [13]}'                       # V1 minimal
+#   '+agent.head_mask_layers={12: [13], 27: [0, 8, 9]}'        # V2 moderate
+head_mask_layers: null
+head_mask_verbose: false

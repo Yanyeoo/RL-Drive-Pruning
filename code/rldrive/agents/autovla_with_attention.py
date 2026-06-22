@@ -2,8 +2,8 @@
 that captures per-vision-token attention from one decoder layer during pre-fill,
 without modifying third_party/AutoVLA.
 
-Status: DRAFT — wire-up tested only on imports. First real-data smoke is gated on
-        chain_complete (navtrain + probe_A.txt landed).
+Status: M1.a verified on navtest (L*=12). M1.b₀ landscape sweep complete.
+        Extended 2026-06-22 with `head_mask_layers` for M1.b Level-0 free-lunch.
 
 Why a wrapper, not a fork:
   - keeps code/third_party/AutoVLA pristine (rebase-clean)
@@ -11,13 +11,17 @@ Why a wrapper, not a fork:
     by just swapping the agent= override
   - all M1.a/M1.b instrumentation lives under code/rldrive/
 
-Hydra usage (planned, after chain_complete):
+Hydra usage:
   PYTHONPATH must include `code/` so `_target_` below resolves.
   Override at run_pdm_score_cot.py call site:
       agent=rldrive.agents.autovla_with_attention.AutoVLAWithAttentionAgent
+      +agent.attention_enabled=true
       +agent.attention_layer_idx=14
       +agent.attention_save_dir=/abs/path/m1a_layer14
-      +agent.attention_enabled=true
+      # M1.b Level-0 (optional, defaults to disabled):
+      '+agent.head_mask_layers={12: [13]}'   # V1 minimal
+
+Spec for head-mask: docs/specs/m1b_freelunch_spec.md
 
 Open verifications inherited from rldrive/scoring/attention_capture.py:
   TODO(M1.a) #4  — assert captured_q_len == prompt_len once
@@ -28,8 +32,9 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -39,6 +44,7 @@ from navsim.agents.autovla_agent import AutoVLAAgent  # noqa: E402
 from navsim.common.dataclasses import Trajectory      # noqa: E402
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling  # noqa: E402
 
+from rldrive.agents.head_mask_patch import patch_head_mask
 from rldrive.scoring.attention_capture import (
     PromptIndex,
     locate_prompt_landmarks,
@@ -48,11 +54,20 @@ from rldrive.scoring.attention_capture import (
 
 
 class AutoVLAWithAttentionAgent(AutoVLAAgent):
-    """Drop-in replacement for AutoVLAAgent that also dumps vision-token attention.
+    """Drop-in replacement for AutoVLAAgent that also dumps vision-token attention
+    and / or applies a static per-(layer, head) attention mask.
 
     Inherits all model-loading, feature-building and trajectory-postprocessing
     from the upstream agent. Overrides `compute_trajectory` to wrap the
-    `self.autovla.predict(features)` call in `patch_attention_capture(...)`.
+    `self.autovla.predict(features)` call in `patch_attention_capture(...)`
+    and / or `patch_head_mask(...)`.
+
+    Two new orthogonal features compared to upstream AutoVLAAgent:
+      * attention_* knobs  -- M1.a vision attention capture (single layer)
+      * head_mask_layers   -- M1.b Level-0 static head-mask (multi-layer)
+
+    Both default to off-equivalent (capture disabled OR returns to vanilla;
+    head_mask_layers=None -> zero hooks, bit-identical to upstream).
     """
 
     requires_scene = False  # inherited; restated for clarity
@@ -73,6 +88,9 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
         attention_save_dir: Optional[str] = None,
         attention_average_heads: bool = True,
         attention_assert_qlen: bool = True,
+        # ---- M1.b Level-0 additions ----
+        head_mask_layers: Optional[Dict[int, List[int]]] = None,
+        head_mask_verbose: bool = False,
     ):
         super().__init__(
             trajectory_sampling=trajectory_sampling,
@@ -91,10 +109,24 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
         self._attn_average_heads = bool(attention_average_heads)
         self._attn_assert_qlen = bool(attention_assert_qlen)
 
+        # M1.b: head-mask config — normalize at ctor time so hydra-loaded
+        # str keys become int. None / empty -> no-op at runtime.
+        self._head_mask_layers: Dict[int, List[int]] = {}
+        if head_mask_layers:
+            for k, v in head_mask_layers.items():
+                if v is None:
+                    continue
+                heads = [int(h) for h in v]
+                if heads:
+                    self._head_mask_layers[int(k)] = heads
+        self._head_mask_verbose = bool(head_mask_verbose)
+
         # Sanity: refuse to silently fail if model loaded under sdpa/flash where
         # `attn_weights` would never be exposed. autovla.py:510 defaults to eager
         # but a user override could break us — fail loud.
-        if self._attn_enabled and not skip_model_load:
+        # Also required for head_mask: the o_proj layout we hook is the same
+        # under eager / sdpa / flash, but we keep eager for consistency with capture.
+        if (self._attn_enabled or self._head_mask_layers) and not skip_model_load:
             attn_impl = getattr(self.autovla.vlm.config, "_attn_implementation", None)
             if attn_impl != "eager":
                 raise RuntimeError(
@@ -111,6 +143,16 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
 
         if self._attn_enabled and self._attn_save_dir is not None:
             self._attn_save_dir.mkdir(parents=True, exist_ok=True)
+
+        if self._head_mask_layers:
+            n_heads_total = sum(len(v) for v in self._head_mask_layers.values())
+            print(
+                f"[AutoVLAWithAttentionAgent] head_mask_layers active: "
+                f"{self._head_mask_layers}  "
+                f"(total heads zeroed: {n_heads_total} across "
+                f"{len(self._head_mask_layers)} layers)",
+                flush=True,
+            )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -185,12 +227,18 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
     # ------------------------------------------------------------------
 
     def compute_trajectory(self, scene_data):  # type: ignore[override]
-        """Mirror of upstream compute_trajectory + attention capture wrap.
+        """Mirror of upstream compute_trajectory + attention capture + head mask wrap.
 
         Mirrors `navsim/agents/autovla_agent.py:418-445` so we stay in lockstep
         with the upstream agent (including the `submission=False` branch and
         the `(trajectory, cot_results)` return shape). If upstream changes
         that body, update here.
+
+        Behavior matrix:
+          attention_enabled=False, head_mask=empty   -> identical to upstream
+          attention_enabled=True,  head_mask=empty   -> M1.a capture only
+          attention_enabled=False, head_mask=set     -> M1.b free-lunch only
+          attention_enabled=True,  head_mask=set     -> both (Phase E sanity)
         """
         self.autovla.eval()
 
@@ -201,25 +249,42 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
         if self.sensor_data_path:
             features.update({"sensor_data_path": self.sensor_data_path})
 
-        # ---- attention capture (M1.a addition) ----
-        if not self._attn_enabled:
+        # ---- Build prompt_index up front if either feature needs it ----
+        # (capture needs it; mask doesn't, but cheap to skip when not needed)
+        prompt_index: Optional[PromptIndex] = None
+        input_ids: Optional[torch.Tensor] = None
+        if self._attn_enabled:
+            prompt_index, input_ids = self._build_prompt_index(features)
+
+        bucket: Dict[str, Any] = {}
+
+        # ---- Compose contexts via ExitStack so any subset can be active ----
+        with ExitStack() as stack:
+            if self._head_mask_layers:
+                stack.enter_context(
+                    patch_head_mask(
+                        vlm=self.autovla.vlm,
+                        head_mask_layers=self._head_mask_layers,
+                        verbose=self._head_mask_verbose,
+                    )
+                )
+            if self._attn_enabled:
+                stack.enter_context(
+                    patch_attention_capture(
+                        vlm=self.autovla.vlm,
+                        layer_idx=self._attn_layer_idx,
+                        prompt_index=prompt_index,
+                        bucket=bucket,
+                        average_heads=self._attn_average_heads,
+                    )
+                )
             with torch.no_grad():
                 poses, cot_results = self.autovla.predict(features)
-        else:
-            prompt_index, input_ids = self._build_prompt_index(features)
-            bucket: Dict[str, Any] = {}
-            with torch.no_grad():
-                with patch_attention_capture(
-                    vlm=self.autovla.vlm,
-                    layer_idx=self._attn_layer_idx,
-                    prompt_index=prompt_index,
-                    bucket=bucket,
-                    average_heads=self._attn_average_heads,
-                ):
-                    poses, cot_results = self.autovla.predict(features)
 
-            # post-hoc sanity asserts (cheap, run for every scene early in M1.a;
-            # we can downgrade to "first scene only" once V2/V3/V4 are clear)
+        # ---- post-hoc sanity asserts for capture (cheap; first scene only via
+        #      flag we may add later if dominating overhead) ----
+        if self._attn_enabled:
+            assert input_ids is not None and prompt_index is not None
             if self._attn_assert_qlen and "captured_q_len" in bucket:
                 expected = int(input_ids.shape[1])
                 got = int(bucket["captured_q_len"])

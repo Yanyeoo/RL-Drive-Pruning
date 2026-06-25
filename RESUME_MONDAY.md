@@ -6,7 +6,69 @@
 
 ---
 
-## 🛑 2026-06-24 20:25 — 23:00 GPU 回收前状态（**START HERE 下一个 AI**） 🛑
+## 🛑🛑 2026-06-25 17:50 — 最新（覆盖以下所有历史 stub）🛑🛑
+
+**下一个 AI 必读这一段（再读其它）**
+
+**M1.b₂ Stage 3 已完工** —— 19,225 navtrain token × 28 layer × 16 head vision-attn dump 全部完成。
+
+| key fact | value |
+|---|---|
+| Output | `exp/m1b2_navtrain_full_alllayers/*.pt` |
+| Files | **19,225 / 19,225** (100%) |
+| Per-file shape | `per_layer_vision_attn = (28, 16, 720)` fp32 |
+| Disk | 24 GB |
+| Wall | 3h16m on 4× H20 (2026-06-25 14:31 → 17:47) |
+| s/scene | 2.25 avg (faster than Stage 1 baseline 2.55) |
+| Errors | 8 trajectory-pose asserts (.pt **already saved**, list in `_stage3_trajectory_err_tokens.txt`) |
+
+完整 journal：**`docs/journal/2026-06-25_m1b2_stage3_done.md`**
+Key results 已更新：`docs/results/key_results.md` §7 + Quick ref 表 + Changelog
+
+下次 GPU 窗口：未定，等用户安排。
+
+**下一个里程碑（M1.b₂ Phase 2）**：用这 19,225 个 per-head attention 张量训练一个 learned per-scene head-gating policy。
+- Input: `(N=19225, L=28, H=16, V=720)` 张量 + `data/navtrain_nocot/` 内的 prompt
+- Goal: 输入 prompt embedding → 预测最优 per-scene head mask
+- **设计文档已落档（2026-06-25 18:18）**：`docs/_internal/m1b2_phase2_design_2026-06-25.md` — 289 行，覆盖 §1 motivation → §10 reviewer 待答问题 + §11 non-goals
+- 状态：等 reviewer 过 §10 的 6 个 open questions（scene 表征 R1 vs R3、稀疏度 k=4、架构 P1+P2、训练 mixed warm-start、acceptance gates G1–G5、预算 22 GPU-h）才能动 GPU
+
+下面 2026-06-24 22:00 / 20:43 / 20:25 段已 obsolete，仅作历史。
+
+---
+
+## 🛑 [已 obsolete] 2026-06-24 22:00 — Stage 3 准备 stub（被上面 2026-06-25 段覆盖）
+
+---
+
+## 🛑 [已 obsolete] 2026-06-24 20:43 — 中段进度（被上面 22:00 段覆盖）
+
+**START HERE — 下一个 AI 必读这一段，再读其它**
+
+> `docs/_internal/handoff_2026-06-24_2043_multilayer_attention_done_navtrain_json_blocked.md`
+
+**一句话状态**：
+- ✅ M1.b₂ multi-layer per-head attention 代码改完（3 文件，零 lint，backup 在 `docs/_internal/backups_20260624_2043/`）
+- ❌ 没跑 D0 smoke（**代码未验码**）
+- ❌ 阻塞：`data/navtrain_nocot/` 全量 pretokenized json **不存在**，只有 `navtrain_nocot_probe100/` 100 个
+- ⏸ 用户已知此状况，让我备份 + 写 handoff，**没有授权下一步动作**
+- 🟢 GPU 全 idle，无后台 job，无 lock
+
+**下一个 AI 的硬规则**（详见 handoff §6）：
+1. 先读上面那个 handoff 文件，**不要**直接启 4 GPU job
+2. 跟用户确认路径 1（CPU 跑 navtrain tokenize 13k）/ 路径 2（probe100 重抽 4min D0）/ 路径 3（混合）
+3. 如果用户授权，**第一步做路径 2 的 D0 smoke**（命令在 handoff §7），验今晚的代码改动
+4. **不要回滚 3 个文件改动**（attention_capture.py / autovla_with_attention.py / run_attention_probe.py）
+5. 改动设计：保留 M1.a 单层路径完全不动，新增 `attention_layer_idxs` 参数 + `--all-layers` flag，None=老路径
+
+**今晚没做的事**（原 20:25 计划被 navtrain json 不存在打断）：
+- ~~D0 stress test~~（数据不在）
+- ~~4 GPU stage 2 抽取~~（数据不在）
+- ~~22:50 hard stop journal~~（没启 job）
+
+---
+
+## 🛑 2026-06-24 20:25 — 23:00 GPU 回收前状态（已被 20:43 段覆盖，仅作历史） 🛑
 
 **时间窗口现实**：现在 20:25，距 23:00 GPU 回收 **2h35min**。M1.b 全量 navtrain attention 抽取
 （103,288 token × 2.16 s/scene）单卡需 62 h，4 卡需 ~16 h —— **2h35 装不下任何有意义的 M1.b 进度**。

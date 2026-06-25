@@ -20,6 +20,7 @@
 | **M1.a Step 5** | navtrain probe A confirm L\*=12 (n=100) | **vision_frac_mean=0.1693 ∈ [0.15, 0.22] ✅ PASS** (std 0.0527, min 0.0705, max 0.3783) | navtest L12 mean=0.1861, consistent | 2026-06-24 | [2026-06-24_m1a_step5_navtrain_probeA_pass.md](../journal/2026-06-24_m1a_step5_navtrain_probeA_pass.md) |
 | **M1.b₀** | L12/L27 per-head decomposition (n=100 + n=200 disjoint) | **L12 has 1 dead head (h13), L27 has 2 dead (h8,h9). Spearman ρ=1.0000 on disjoint sample. top-12 retains 96.8% vision attn @ 25% KV reduction.** | — | 2026-06-18 | [m1b_per_head_analysis_2026-06-18.md](../_internal/m1b_per_head_analysis_2026-06-18.md) |
 | **M1.b₁** | Level-0 free-lunch full navtest sweep (4 var × 4 shard, n≈11574/variant) | **V0=0.8985, V1=0.8981 (Δ=−0.0004, free-lunch ✅), V2=0.8545, V3=0.8537** (Pareto front; V1 = best operating point at 0.39% KV saving) | B0=0.8983, V0 reproduces +0.0002 ✅ | 2026-06-24 | §6 below |
+| **M1.b₂ Stage 3** | navtrain per-layer × per-head vision-attn dump (full 19,225 tokens) | **19,225 / 19,225 .pt** shape `(28,16,720)`, 8 trajectory-asserts (0.042%, .pt still saved), 2.25 s/scene, 3h16m on 4× H20 | unblocks Phase 2 learned head-gating | 2026-06-25 | [2026-06-25_m1b2_stage3_done.md](../journal/2026-06-25_m1b2_stage3_done.md) |
 
 > ⚠️ 任何一行变动 = 必须改这表 + 在对应 journal 里留 diff link。
 
@@ -368,7 +369,78 @@ PY
 
 ---
 
-## 7. Changelog of this file
+## 7. M1.b₂ Stage 3 — navtrain per-head attention dump (LOCKED)
+
+**Headline**: dumped per-layer × per-head vision attention `(28, 16, 720)` for **all 19,225 navtrain_avail19k tokens** in **3h16m wall** on 4× H20, **0 OOM**, **0 deadlocks**, **8 trajectory-pose asserts** (data-side noise, .pt **still saved** before assert fires).
+
+### 7.1 What got produced
+
+| metric | value |
+|---|---|
+| Output dir | `exp/m1b2_navtrain_full_alllayers/` |
+| `\|.pt\|` | **19,225** (100% of input token-list) |
+| Per-file shape | `per_layer_vision_attn = (28, 16, 720)`, fp32, ~1.30 MB |
+| Total disk | 24 GB |
+| Tensor metadata | `multi_layer=True`, `average_heads=False`, `layer_idxs[28]`, `vision_token_positions(720,)` |
+
+### 7.2 Performance
+
+| metric | observed | budget | judgment |
+|---|---:|---:|---|
+| s/scene avg | **2.25** | < 4.0 | ✅ 11% faster than Stage 1 (2.55) |
+| Wall (4× H20) | **3h16m** | < 14h | ✅ |
+| GPU memory peak | **30.9 GB / 98 GB** | < 50 GB | ✅ |
+| Per-shard wall imbalance | max−min = 3.4 min | — | excellent (stride-sharding) |
+| Per-shard error counts | 1 / 5 / 0 / 2 | < 10/shard | ✅ |
+
+### 7.3 Sharding (built-in stride)
+
+| Shard | num_tokens | OK | Err | Wall | s/scene |
+|---|---:|---:|---:|---:|---:|
+| 0 (cuda:0) | 4807 | 4806 | 1 | 180.9 min | 2.26 |
+| 1 (cuda:1) | 4806 | 4801 | 5 | 180.9 min | 2.26 |
+| 2 (cuda:2) | 4806 | 4806 | 0 | 177.5 min | 2.22 |
+| 3 (cuda:3) | 4806 | 4804 | 2 | 180.5 min | 2.25 |
+| **Σ** | **19,225** | **19,217** | **8** | — | **2.25** |
+
+Used `--shard-stride 4 --shard-index k` (internal to `run_attention_probe.py`) — no token-list pre-splitting needed.
+
+### 7.4 The 8 trajectory-error tokens
+
+Attention `.pt` is saved **inside forward hook** (before the trajectory-pose assert fires in the inherited PDMS sample prep). So the 8 `err` tokens have their **attention saved successfully** — but the trajectory metadata is malformed in the navtrain source data (`Trajectory poses and sampling have unequal number of poses`).
+
+Token list saved at `exp/m1b2_navtrain_full_alllayers/_stage3_trajectory_err_tokens.txt`. Downstream policy:
+
+- **Phase 2 head-gating training**: use all 19,225 (attention is fine).
+- **Future navtrain-side PDMS scoring** (mirror of M1.b₁): drop the 8, use 19,217.
+
+### 7.5 What this unlocks (next step queue)
+
+- ✅ **M1.b₂ Phase 2** — learned per-scene head-gating policy. Input: `(N=19225, 28, 16, 720)` per-head attention + pretokenized scene metadata in `data/navtrain_nocot/`. Goal: predict optimal per-scene head-mask from prompt embedding. **Design doc: `docs/_internal/m1b2_phase2_design_2026-06-25.md` (2026-06-25)**.
+- ⏳ Per-scene rank-variance analysis (feeds Phase 2 prior). Now usable at N=19,225 (vs n=200 in M1.b₀).
+- ⏳ Future navtrain free-lunch sweep (V0/V1/V2/V3 mirror of M1.b₁ Phase F on navtrain). Budget @ 2.25 s/scene × 4 var ≈ 12 GPU-h, fits one window.
+
+### 7.6 Cost summary
+
+| component | value |
+|---|---|
+| Compute | 4× H20 × 3h16m = ~13 GPU-h |
+| Storage | 24 GB |
+| Window utilization | 196 min / 840 min = 23% (huge headroom for Phase 2 in same window if needed) |
+
+### 7.7 Artifacts
+
+| path | content |
+|---|---|
+| `exp/m1b2_navtrain_full_alllayers/*.pt` | 19,225 per-head attention tensors |
+| `exp/m1b2_navtrain_full_alllayers/_stage3_trajectory_err_tokens.txt` | 8-token denylist |
+| `logs/m1b2_full/{dryrun,shard_0,shard_1,shard_2,shard_3}.log` | full run logs |
+| `exp/m1b2_stage3_dryrun/*.pt` | 20-token dryrun output (kept for shape reference) |
+| `docs/journal/2026-06-25_m1b2_stage3_done.md` | full journal |
+
+---
+
+## 8. Changelog of this file
 
 | date | change |
 |---|---|
@@ -381,3 +453,4 @@ PY
 | 2026-06-24 09:53 | **M1.b₁ Phase F full navtest sweep DONE** (4 var × 4 shard, n≈11574/variant, 14h35m on 2× H20, rc=0 on all 16 cells, git `f084f26`). V0=0.8985 reproduces B0 (Δ=+0.0002). **Free-lunch confirmed at V1**: V1=0.8981, Δ vs V0 = **−0.0004** ✅. L27 mask is the cliff (V1→V2: −4.4 pp). L24 11-head mask is essentially free (V2→V3: −0.08 pp, +5.47% KV). Pareto: V0/V1/V2/V3 = 0.8985 / 0.8981 / 0.8545 / 0.8537. Pending follow-up: V4 = L12:{h13}+L24:{11 heads} isolation. Full table in §6. |
 | 2026-06-24 17:30 | **navtrain UNBLOCKED**. `.chain_failed` 是假阳性 (`install_navtrain.sh:81` SIGPIPE under `set -euo pipefail`)，已 patch + 翻 `.chain_complete`。`SceneLoader` 实测 built=103288 == declared=103288, diff=0。Incident: `docs/_internal/incident_2026-06-24_navtrain_chain_failed_false_positive.md`。坑预警：不要拿 `build_all_sensors()` smoke test，navtrain 是稀疏 key-frame 设计。 |
 | 2026-06-24 20:10 | **M1.a Step 5 navtrain probe A PASS**. n=100, L=12, `vision_frac_mean=0.1693` ∈ [0.15, 0.22] ✅。L\*=12 在 train/test 双成立（gap 0.017 within sampling noise）。M1.a 完整交付。Journal: `docs/journal/2026-06-24_m1a_step5_navtrain_probeA_pass.md`。详情见 §4.5。 |
+| 2026-06-25 17:47 | **M1.b₂ Stage 3 DONE**. Per-head × per-layer vision-attn dump on **full 19,225 navtrain tokens**, 4× H20 × 3h16m, 2.25 s/scene, 30.9 GB peak. 19,225 / 19,225 .pt files at shape `(28,16,720)`. 8 trajectory-pose asserts (0.042%, .pt saved before assert; logged in `_stage3_trajectory_err_tokens.txt`). Unblocks M1.b₂ Phase 2 learned head-gating. Full details §7 above. Journal: `docs/journal/2026-06-25_m1b2_stage3_done.md`. |

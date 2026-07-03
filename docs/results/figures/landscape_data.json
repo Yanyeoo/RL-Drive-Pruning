@@ -1,0 +1,133 @@
+{
+  "V0": 0.898,
+  "points": [
+    {
+      "layer": 4,
+      "dPDMS": 0.00071,
+      "n": 11574,
+      "shards": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "verdict": "free",
+      "source": "disk L4K4"
+    },
+    {
+      "layer": 8,
+      "dPDMS": 0.00095,
+      "n": 11574,
+      "shards": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "verdict": "free",
+      "source": "disk L8K4"
+    },
+    {
+      "layer": 12,
+      "dPDMS": 0.0004,
+      "n": 5744,
+      "shards": [
+        0,
+        1
+      ],
+      "verdict": "free",
+      "source": "Sc4 \u00a76.7 (2-shard)"
+    },
+    {
+      "layer": 16,
+      "dPDMS": 0.00051,
+      "n": 11575,
+      "shards": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "verdict": "free",
+      "source": "disk L16K4"
+    },
+    {
+      "layer": 20,
+      "dPDMS": -0.0022,
+      "n": 11574,
+      "shards": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "verdict": "borderline",
+      "source": "disk L20K4"
+    },
+    {
+      "layer": 22,
+      "dPDMS": 0.00014,
+      "n": 11575,
+      "shards": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "verdict": "free",
+      "source": "disk L22K4"
+    },
+    {
+      "layer": 24,
+      "dPDMS": -0.00265,
+      "n": 11576,
+      "shards": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "verdict": "borderline",
+      "source": "disk L24K4"
+    },
+    {
+      "layer": 25,
+      "dPDMS": 0.00149,
+      "n": 11574,
+      "shards": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "verdict": "borderline",
+      "source": "disk L25K4"
+    },
+    {
+      "layer": 26,
+      "dPDMS": -0.00039,
+      "n": 11574,
+      "shards": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "verdict": "free",
+      "source": "disk L26K4"
+    },
+    {
+      "layer": 27,
+      "dPDMS": -0.04495,
+      "n": 11573,
+      "shards": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "verdict": "cliff",
+      "source": "disk L27K4"
+    }
+  ]
+}

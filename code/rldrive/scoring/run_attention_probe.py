@@ -59,6 +59,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="dir of per-scene pre-tokenized json files (navtest_nocot or navtrain_nocot)")
     p.add_argument("--per-head", action="store_true",
                    help="store per-head attention (num_heads, N_vision) instead of head-mean")
+    p.add_argument("--all-layers", action="store_true",
+                   help="M1.b₂: capture per-head attention from EVERY layer "
+                        "(0..num_hidden_layers-1) in a single forward pass. "
+                        "Overrides --layer-idx and implies --per-head. "
+                        "Output .pt has key 'per_layer_vision_attn' shape (L, H, N_vision).")
+    p.add_argument("--num-layers", type=int, default=28,
+                   help="number of decoder layers (Qwen2.5-VL-3B = 28). Only used with --all-layers.")
     p.add_argument("--dry-run", action="store_true",
                    help="parse args + load model, do not run any scenes")
     p.add_argument("--token-list", type=Path, default=None,
@@ -101,6 +108,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[probe] scene_filter   = {args.scene_filter}", flush=True)
     print(f"[probe] save_dir       = {args.save_dir}", flush=True)
     print(f"[probe] layer_idx      = {args.layer_idx}", flush=True)
+    print(f"[probe] all_layers     = {args.all_layers} (num_layers={args.num_layers})", flush=True)
     print(f"[probe] gpu            = {args.gpu}", flush=True)
     print(f"[probe] per_head       = {args.per_head}", flush=True)
     print(f"[probe] max_scenes     = {args.max_scenes}", flush=True)
@@ -109,7 +117,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print("[probe] loading AutoVLAWithAttentionAgent...", flush=True)
     t0 = time.time()
-    agent = AutoVLAWithAttentionAgent(
+    agent_kwargs = dict(
         trajectory_sampling=traj_samp,
         checkpoint_path=args.checkpoint,
         sensor_data_path=args.sensor_data,
@@ -123,6 +131,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         attention_average_heads=(not args.per_head),
         attention_assert_qlen=True,
     )
+    if args.all_layers:
+        agent_kwargs["attention_layer_idxs"] = list(range(args.num_layers))
+    agent = AutoVLAWithAttentionAgent(**agent_kwargs)
     agent.initialize()
     print(f"[probe] model loaded in {time.time() - t0:.1f}s", flush=True)
 

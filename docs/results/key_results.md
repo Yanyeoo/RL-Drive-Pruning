@@ -299,12 +299,13 @@ Full 4-variant × 4-shard sweep on navtest, **n_valid ≈ 11574 / variant** (out
 
 ### 6.1 Headline matrix
 
-| variant | mask spec (recap from §5.4) | heads | KV saving | s0 (n=2949) | s1 (n=2796) | s2 (n=2962) | s3 (n=2867) | **all (weighted)** | Δ vs V0 |
+| variant | mask spec (recap from §5.4) | heads | KV saving | s0 (n≈2949) | s1 (n≈2796) | s2 (n≈2963) | s3 (n≈2868) | **all (weighted)** | Δ vs V0 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | **V0** | _no mask_ (B0 reproduce) | 0 | 0.00% | 0.8958 | 0.9003 | 0.8938 | 0.9042 | **0.8985** | — |
 | **V1 minimal** | L12:{h13} | 1 | 0.39% | 0.8960 | 0.9020 | 0.8921 | 0.9026 | **0.8981** | **−0.0004** ✅ free-lunch |
 | **V2 moderate** | L12:{h13} + L27:{h0,h8,h9} | 4 | 1.56% | 0.8621 | 0.8520 | 0.8421 | 0.8619 | **0.8545** | **−0.0440** ❌ cliff |
 | **V3 aggressive** | V2 + L24:{11 heads} | 15 | 5.86% | 0.8630 | 0.8498 | 0.8372 | 0.8649 | **0.8537** | **−0.0448** (≈V2) |
+| **V4 isolation** | L12:{h13} + L24:{h7,h9,h10} | 4 | 1.56% | 0.8947 (n=2948) | 0.8998 (n=2796) | 0.8890 (n=2963) | 0.8980 (n=2868) | **0.8953** (n=11575) | **−0.0032** ✅ ≈free at +1.56% KV |
 
 ### 6.2 Findings
 
@@ -337,10 +338,66 @@ Full 4-variant × 4-shard sweep on navtest, **n_valid ≈ 11574 / variant** (out
 
 ### 6.5 Pending follow-ups
 
-- ⏳ **V4 isolation** = L12:{h13} + L24:{11 heads} only (no L27 mask) — expected ~5.85% KV saving at near-V1 PDMS. Estimated cost: 4 cells × 109 min ÷ 2 GPU ≈ 3.6h.
+- ✅ **V4 isolation DONE (2026-06-29)** — actual V4 = L12:{h13} + L24:{h7, h9, h10} (rank-variance-principled from m1b₂ Stage 3, replacing the original "L24:{11 heads}" plan; spec `docs/_internal/m1b2_v4_spec_2026-06-25.md`). 4-shard combined PDMS = **0.8953** (Δ vs V0 = −0.0032, n=11575). **Pareto interpretation**: V4 trades a tiny 0.3 pp PDMS for the same 1.56% KV saving as V2 — i.e. swapping the L27 mask (cliff, −4.4 pp) for an L24 mask is **~14× cheaper at equal KV-savings**. Shards: s0=0.8947(2948) / s1=0.8998(2796) / s2=0.8890(2963) / s3=0.8980(2868). Run dirs: `M1b_freelunch_V4_g0_20260626_154324` (s0), `..._V4_g1_20260626_154429` (s2), `..._V4_g0_20260629_121502` (s1), `..._V4_g1_20260629_121821` (s3).
 - ⏳ Per-shard variance check: shard-2 is consistently lowest across all variants (Δ vs s3 ≈ −0.01). Likely scene-mix artifact; document in journal.
 - ⏳ Cross-check V0=0.8985 vs B0=0.8983 (4-token rounding) — non-blocking, write up in B0 journal.
 - ⏳ Hand off to **M1.b₂ Level-2 learned policy**: use L12 head-h13 mask as default, plus L24 11-head as default (cheap), then learn per-scene gating over the L27 heads.
+
+### 6.7 Cross-layer free-lunch sweep — per-layer bot-4 head removal (2026-06-30, 4× H20)
+
+Probe "is the L8/L16/L20 bot-4-head removal also free?" — same K=4 mask, applied one layer at a time (vs §6.1 which mixed layers). Driven by chain `scripts/_chain_xlayer_batch23.sh`; 2 shards for L8 (g0/g1) extended to 4-shard for L16/L20.
+
+| variant | mask | heads | s0 (g0) | s1 (g1) | s2 (g2) | s3 (g3) | **mean** | Δ vs V0(0.8980) | verdict |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| **L8K4**  | L8 bot-4  | 4 | 0.8959 | 0.9012 | 0.8946 | 0.9044 | **0.8990** | +0.0010 | FREE ✅ |
+| **L16K4** | L16 bot-4 | 4 | 0.8971 | 0.9016 | 0.8936 | 0.9021 | **0.8986** | +0.0006 | FREE ✅ |
+| **L20K4** | L20 bot-4 | 4 | 0.8951 | 0.9004 | 0.8879 | 0.9002 | **0.8959** | −0.0021 | borderline ⚠️ |
+| **Lcomb4K4** | multi-layer 16h | 16 | _chain ~22:55 start, likely midnight-cut_ | | | | | | ⏳ |
+
+**Findings (preliminary)**:
+1. **L8 + L16 bot-4 removal both free** — Δ within ±0.001, inside the ~0.008 per-shard noise band. Mid-stack layers tolerate bot-4 head removal just like L12 (§6.1 V1).
+2. **🔑 Layer-position cost gradient (the valuable result)** — cost of bot-4 removal rises monotonically toward the output:
+   `L8(+0.0010) ≈ L12(+0.0004) ≈ L16(+0.0006) [free] → L20(−0.0021) [borderline] → L27(−0.044) [cliff]`.
+   Early/mid-layer bot-4 heads are fully re-routable downstream; compensation weakens toward the output (L20 shows the first dip, L27 is the cliff). This is **direct quantitative evidence for the layer-position-structural (not magnitude-based) redundancy story** — the real paper spine (path A), far stronger than "yet another free layer."
+   (L20K4 s2=0.8879 is partly the known shard-2 scene-mix artifact, §6.5; mean still −0.0021, trend holds.)
+3. **Scientific marginal value of the headline (Lcomb) is low** (per 06-30 21:00 critical review): cumulative-mask points feed the "layer × prunability landscape" map, NOT a standalone efficiency headline (KV savings single-digit %, no measured wall-clock speedup).
+
+Run dirs: `results/raw/M1b_freelunch_L{8,16,20}K4_g{0..3}_20260630_*`. Backup: `backups/nightwatch_20260630_210454/aggregates/`.
+
+**Lcomb4K4 (16-head cumulative headline)**: midnight-cut **0/4 shards** (dirs `M1b_freelunch_Lcomb4K4_g{0..3}_20260630_225413` exist, all `aggregate.json` absent). Per 06-30 §偏离 #5 this is the lowest scientific-value variant (path B); not resumed. If needed later: `VARIANTS="Lcomb4K4" SHARDS="0 1 2 3" GPUS="0 1 2 3" SKIP_DONE=1 bash scripts/run_m1b_phaseF_2gpu.sh`.
+
+### 6.8 Layer × Prunability Landscape (the path-A paper spine, updated 2026-07-03)
+
+Consolidated per-layer **clean bot-4 head-removal** cost. **All points below are on-disk 4-shard weighted means (n≈11574/point)** recomputed from `results/raw/M1b_freelunch_L{N}K4_*` (dedup latest dir per shard, weighted by n_valid). V0 baseline = 0.8980.
+
+| layer | mask (bot-4) | ΔPDMS vs V0 | shards | verdict | cycle |
+|---|---|---:|---|---|---|
+| L0  | [1,5,11,12] | _pending_ (rerun, TIMEOUT=12000) | — | pending | 07-03 |
+| **L4**  | [0,1,4,15] | **+0.00071** | 4 | free ✅ | 07-03 |
+| **L8**  | [11,12,14,15] | **+0.00095** | 4 | free ✅ | 06-30 |
+| **L12** | Sc4 [0,6,13,14] | **+0.0004** | 2 | free ✅ | §6.7 |
+| **L16** | [1,10,13,14] | **+0.00051** | 4 | free ✅ | 06-30 |
+| **L20** | [8,11,12,14] | **−0.0022** | 4 | borderline ⚠️ | 06-30 |
+| **L22** | [1,3,5,8] | **+0.00014** | 4 | free ✅ | 07-03 |
+| **L24** | [0,7,9,10] | **−0.00265** | 4 | borderline ⚠️ | 07-01 (clean) |
+| **L25** | [7,10,12,13] | **+0.00149** | 4 | slight-improve ↑ | 07-03 |
+| **L26** | [0,8,11,13] | **−0.00039** | 4 | free ✅ | 07-03 |
+| **L27** | [0,8,9,15] | **−0.04495** | 4 | **cliff** ❌ | 07-01 (clean) |
+
+> All bot-4 sets from `botK_freq_alllayers28.json`. L12 is the 2-shard Sc4 ref; every other row is a clean 4-shard on-disk mean. L24/L27 replaced the 06-30 mixed-protocol fallbacks (V4/V2) with clean isolated bot-4 runs. L25 ΔPDMS=+0.0015 is a slight improvement (plot verdict labels it "borderline" only because |Δ|>0.001).
+
+**Figure**: `docs/results/figures/layer_prunability_landscape.png` (script: `scripts/plot_layer_prunability_landscape.py`; `CANDIDATE_LAYERS` extended to include 22/25/26 on 07-03).
+
+**⚠️ Finding CORRECTED (2026-07-03) — the "monotone cost-toward-output" claim is REFUTED.**
+The 07-01 claim of a *monotone* gradient (`L8≈L12≈L16 free → L20 → L27 cliff`) was an artifact of the sparse sampling (only L20/L24/L27 negative). Filling the cliff-onset region (L22/L25/L26) shows the trend is **NOT monotone**:
+`L20(−0.0022) · L22(+0.0001) · L24(−0.0027) · L25(+0.0015) · L26(−0.0004) → L27(−0.04495)`.
+- **The cliff is a *sudden wall*, not a gradual slope**: the layer immediately before the output, **L26, is still FREE (−0.0004)**, yet **L27 collapses to −0.045** (~115× the noise floor).
+- L22/L25/L26 are all free/slightly-positive; L20/L24 are only marginally negative (~2–3× the ±0.001 noise floor) — a weak, non-monotone dip, not a staircase.
+- **Robust, defensible claim**: bot-4 head removal is *essentially free across the entire decoder*, and the only layer whose bot heads are structurally irreplaceable is **the final layer L27**. Redundancy is high and roughly flat across depth; non-prunability is **highly localized at the output layer**, not a smooth depth gradient.
+
+> ⚠️ Consequence for `magnitude_vs_prunability`: the earlier `Spearman(ΔPDMS, layer_idx)=−0.943` was computed on the sparse 6-point set and is **no longer valid** given non-monotonicity — needs recompute over the full 10-point set (expected to weaken substantially). The stronger, surviving point is still magnitude-agnostic: L26 (adjacent to L27) is free while L27 is the cliff, so **position (specifically "is-final-layer"), not magnitude, predicts prunability**. Framing rewrite (monotone-gradient → localized-final-layer-wall) pending user sign-off (autonomy contract: data recorded, thesis change deferred).
+
+**Cycle 2026-07-02→07-03 status**: cliff-onset targets **L22K4/L25K4/L26K4 + left-end L4K4 completed** (unattended `_driver_landscape_20260702.sh`+watchdog, 2× H20, deadline 07-03 18:00). L24K4/L27K4 corrected to clean 4-shard at cycle start. **L0K4 timed out (rc=124: L0-mask slows decode to ~3 s/scene > 2.25 h/shard)** — rerunning standalone with TIMEOUT=12000 (may not finish before 18:00). K6 over-prune walls not reached (deadline). Journal: `docs/journal/2026-07-02.md`.
 
 ### 6.6 Aggregation reproducibility
 
@@ -454,3 +511,7 @@ Token list saved at `exp/m1b2_navtrain_full_alllayers/_stage3_trajectory_err_tok
 | 2026-06-24 17:30 | **navtrain UNBLOCKED**. `.chain_failed` 是假阳性 (`install_navtrain.sh:81` SIGPIPE under `set -euo pipefail`)，已 patch + 翻 `.chain_complete`。`SceneLoader` 实测 built=103288 == declared=103288, diff=0。Incident: `docs/_internal/incident_2026-06-24_navtrain_chain_failed_false_positive.md`。坑预警：不要拿 `build_all_sensors()` smoke test，navtrain 是稀疏 key-frame 设计。 |
 | 2026-06-24 20:10 | **M1.a Step 5 navtrain probe A PASS**. n=100, L=12, `vision_frac_mean=0.1693` ∈ [0.15, 0.22] ✅。L\*=12 在 train/test 双成立（gap 0.017 within sampling noise）。M1.a 完整交付。Journal: `docs/journal/2026-06-24_m1a_step5_navtrain_probeA_pass.md`。详情见 §4.5。 |
 | 2026-06-25 17:47 | **M1.b₂ Stage 3 DONE**. Per-head × per-layer vision-attn dump on **full 19,225 navtrain tokens**, 4× H20 × 3h16m, 2.25 s/scene, 30.9 GB peak. 19,225 / 19,225 .pt files at shape `(28,16,720)`. 8 trajectory-pose asserts (0.042%, .pt saved before assert; logged in `_stage3_trajectory_err_tokens.txt`). Unblocks M1.b₂ Phase 2 learned head-gating. Full details §7 above. Journal: `docs/journal/2026-06-25_m1b2_stage3_done.md`. |
+| 2026-06-29 14:10 | **M1.b₁ V4 isolation 4-shard DONE**. V4 = L12:{h13} + L24:{h7,h9,h10} (rank-variance-principled, not the original "L24:{11 heads}" plan). 4-shard combined PDMS = **0.8953** (Δ vs V0 = **−0.0032**, n=11575). Trades 0.3 pp PDMS for the same 1.56% KV saving as V2 — **swapping L27 mask for L24 mask is ~14× cheaper at equal KV savings**. shard0/2 done 06-26, shard1/3 done today on 2× H20 (~1.9h each). §6.1 table + §6.5 follow-ups updated. Journal: `docs/journal/2026-06-29.md`. |
+| 2026-07-01 18:20 | **Layer × Prunability Landscape assembled (§6.8)**. Recomputed L8/L16/L20 bot-4 4-shard means from disk (reproduces 06-30 within ±0.0001). Consolidated L8→L27 into one landscape table + figure (`docs/results/figures/layer_prunability_landscape.png`). Confirms monotone cost-toward-output gradient: L8/L12/L16 free → L20 borderline (−0.0022) → L27 cliff (−0.044). Magnitude anti-correlates with prunability (path-A spine). Lcomb4K4 confirmed midnight-cut 0/4, not resumed (lowest value). No GPU used. Journal: `docs/journal/2026-07-01.md`. |
+| 2026-07-03 15:3x | **Landscape cliff-onset resolved + §6.8 corrected (cycle 07-02→07-03, 2× H20)**. Added clean 4-shard **L22K4=+0.00014, L25K4=+0.00149, L26K4=−0.00039, L4K4=+0.00071**; corrected L24K4/L27K4 to clean 4-shard (=−0.00265 / −0.04495). ⚠️ **07-01 "monotone gradient" REFUTED**: L26 (adjacent to output) is still FREE while L27 collapses → cliff is a **sudden final-layer wall, not a slope**; bot-4 removal is ~free across the whole decoder except L27. Fixed plot `CANDIDATE_LAYERS` (was missing 22/25/26). L0K4 timed out (rc=124, L0-mask slows decode); rerunning TIMEOUT=12000. K6 walls not reached (deadline). `Spearman(ΔPDMS,depth)=−0.943` now invalid (non-monotone) — needs recompute. Journal: `docs/journal/2026-07-02.md`. |
+| 2026-06-29 21:36 | **M1.b₂ Phase 3 Step 1 + Pivot 1 (Sc6) DONE**. L12 const top-K navtest sweep on **fresh navtest, 2-shard combined, n=5744**. V0=0.8980, V1=L12:[13]=0.8990, **Sc4 L12:[0,6,13,14]=0.8984 (+0.0004)**, **Sc4n13 L12:[0,2,6,14]=0.8988 (+0.0008)**, **Sc6 L12:[0,2,4,6,13,14]=0.8985 (+0.0005) ✅ FREE**. Conclusion: **L12 const K=6 mask (37.5% of layer heads) is fully free** within seed-to-seed noise (~0.005). Refutes original Phase 3 Gate G_p3_1 (required dynamic ≥ 0.9034 > V0 — physically unreachable). New Gate G_p3_1': dynamic (K_eff, PDMS) Pareto-dominate static curve. Sc8/Sc10 in queue (22:00 GPU recycle interrupts; resume 06-30 on 4× H20). Journal §21:36, step1_results.md, phase3_step2_spec.md. |

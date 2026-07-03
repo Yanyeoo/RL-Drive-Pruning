@@ -49,6 +49,7 @@ from rldrive.scoring.attention_capture import (
     PromptIndex,
     locate_prompt_landmarks,
     patch_attention_capture,
+    patch_attention_capture_multilayer,
     resolve_vision_token_ids,
 )
 
@@ -88,6 +89,11 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
         attention_save_dir: Optional[str] = None,
         attention_average_heads: bool = True,
         attention_assert_qlen: bool = True,
+        # ---- M1.b₂ addition: multi-layer per-head capture ----
+        # If non-empty, OVERRIDES attention_layer_idx and attention_average_heads.
+        # Captures per-head attention from EVERY layer in this list in a single
+        # forward pass and saves them as one stacked tensor per scene.
+        attention_layer_idxs: Optional[List[int]] = None,
         # ---- M1.b Level-0 additions ----
         head_mask_layers: Optional[Dict[int, List[int]]] = None,
         head_mask_verbose: bool = False,
@@ -108,6 +114,15 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
         self._attn_save_dir = Path(attention_save_dir) if attention_save_dir else None
         self._attn_average_heads = bool(attention_average_heads)
         self._attn_assert_qlen = bool(attention_assert_qlen)
+
+        # M1.b₂: multi-layer per-head capture. None or empty -> single-layer
+        # legacy path (M1.a) controlled by attention_layer_idx.
+        self._attn_layer_idxs: Optional[List[int]] = None
+        if attention_layer_idxs:
+            self._attn_layer_idxs = sorted({int(L) for L in attention_layer_idxs})
+            # Multi-layer mode forces per-head storage (head-mean would defeat
+            # the purpose: M1.c LambdaRank scorer needs per-head features).
+            self._attn_average_heads = False
 
         # M1.b: head-mask config — normalize at ctor time so hydra-loaded
         # str keys become int. None / empty -> no-op at runtime.
@@ -196,6 +211,40 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
                         prompt_index: PromptIndex, input_ids: torch.Tensor) -> None:
         if self._attn_save_dir is None:
             return
+
+        # ---- Multi-layer (M1.b₂) branch ----
+        if self._attn_layer_idxs is not None:
+            per_layer = bucket.get("per_layer_vision_attn", {})
+            missing = [L for L in self._attn_layer_idxs if L not in per_layer]
+            tag = scene_token or f"call{self._attn_call_idx:06d}"
+            if missing:
+                sentinel = self._attn_save_dir / f"{tag}.MISSING.json"
+                sentinel.write_text(json.dumps({
+                    "reason": "multi-layer attn_weights not captured for some layers",
+                    "missing_layers": missing,
+                    "captured_layers": sorted(per_layer.keys()),
+                    "prompt_len": int(input_ids.shape[1]),
+                    "n_vision": int(prompt_index.n_vision),
+                }))
+                return
+            # Stack in the requested order -> (L, num_heads, N_vision)
+            stacked = torch.stack(
+                [per_layer[L] for L in self._attn_layer_idxs], dim=0
+            )
+            torch.save({
+                "per_layer_vision_attn": stacked,                                 # (L, H, N_vision)
+                "layer_idxs": list(self._attn_layer_idxs),
+                "vision_token_positions": prompt_index.vision_token_positions.cpu(),
+                "last_instr_idx": prompt_index.last_instr_idx,
+                "vision_blocks": prompt_index.vision_blocks,
+                "captured_q_len": bucket.get("captured_q_len"),
+                "prompt_len": int(input_ids.shape[1]),
+                "average_heads": False,
+                "multi_layer": True,
+            }, self._attn_save_dir / f"{tag}.pt")
+            return
+
+        # ---- Single-layer (M1.a) legacy branch ----
         if "vision_attn" not in bucket:
             # Capture didn't fire — likely V2 (pre-fill chunked) or layer never executed.
             # Don't silently drop; write a sentinel.
@@ -269,15 +318,25 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
                     )
                 )
             if self._attn_enabled:
-                stack.enter_context(
-                    patch_attention_capture(
-                        vlm=self.autovla.vlm,
-                        layer_idx=self._attn_layer_idx,
-                        prompt_index=prompt_index,
-                        bucket=bucket,
-                        average_heads=self._attn_average_heads,
+                if self._attn_layer_idxs is not None:
+                    stack.enter_context(
+                        patch_attention_capture_multilayer(
+                            vlm=self.autovla.vlm,
+                            layer_idxs=self._attn_layer_idxs,
+                            prompt_index=prompt_index,
+                            bucket=bucket,
+                        )
                     )
-                )
+                else:
+                    stack.enter_context(
+                        patch_attention_capture(
+                            vlm=self.autovla.vlm,
+                            layer_idx=self._attn_layer_idx,
+                            prompt_index=prompt_index,
+                            bucket=bucket,
+                            average_heads=self._attn_average_heads,
+                        )
+                    )
             with torch.no_grad():
                 poses, cot_results = self.autovla.predict(features)
 

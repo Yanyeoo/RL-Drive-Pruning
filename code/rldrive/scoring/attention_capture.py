@@ -345,10 +345,98 @@ def resolve_vision_token_ids(vlm) -> Dict[str, int]:
 # All TODO(M1.a) items must clear before M1.a layer probing runs are
 # trusted; M1.b is gated on M1.a.
 
+# ---------------------------------------------------------------------------
+# M1.b₂ — multi-layer per-head capture (full 28×num_heads landscape per scene)
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def patch_attention_capture_multilayer(
+    vlm,
+    layer_idxs: List[int],
+    prompt_index: PromptIndex,
+    bucket: Optional[Dict] = None,
+):
+    """Like patch_attention_capture, but patches every layer in `layer_idxs`
+    and always stores per-head (no head-mean) for the M1.b₂ navtrain full
+    sweep.
+
+    For each layer L in `layer_idxs`, populates
+        bucket["per_layer_vision_attn"][L]: (num_heads, N_vision) float32 cpu
+
+    Independent one-shot flag per layer. Each layer's first forward call (the
+    pre-fill) is captured; subsequent decode-step calls (q_len=1) are
+    skipped. attn_weights is forced to be computed for that one call by
+    injecting output_attentions=True, then stripped back to None on the
+    return path so HF generate() doesn't accumulate them across decode
+    steps (the 7GB Path A problem stays solved).
+
+    Memory: peak per-layer attn_weights tensor is
+      (1, num_heads, q_len, q_len) ~ 24 * 941^2 * 4B ≈ 85 MB on H20,
+    living for the duration of orig_forward then sliced+freed. 28 layers
+    in series, NOT in parallel, so peak is one layer at a time.
+
+    Disk: per-token .pt is (28, 24, N_vision=720) * 4B ≈ 1.9 MB.
+    """
+    if bucket is None:
+        bucket = {}
+    bucket.setdefault("per_layer_vision_attn", {})
+
+    q_idx = prompt_index.last_instr_idx
+    vis_pos = prompt_index.vision_token_positions
+
+    # Build (layer_obj, orig_forward, captured_flag) tuples so finally{} can
+    # restore even on partial setup failure.
+    patched = []  # list of (self_attn, orig_forward)
+
+    def make_patched_forward(layer_idx_local: int, captured: Dict[str, bool]):
+        layer = vlm.model.layers[layer_idx_local]
+        self_attn = layer.self_attn
+        orig_forward = self_attn.forward
+
+        def patched_forward(self, hidden_states, *args, **kwargs):
+            force_oa = not captured["done"]
+            if force_oa:
+                kwargs = dict(kwargs)
+                kwargs["output_attentions"] = True
+
+            attn_output, attn_weights, past_kv = orig_forward(
+                hidden_states, *args, **kwargs
+            )
+
+            if force_oa and attn_weights is not None and not captured["done"]:
+                q_len = attn_weights.shape[2]
+                if q_idx < q_len:
+                    row = attn_weights[0, :, q_idx, :]                    # (num_heads, k_len)
+                    vis_pos_dev = vis_pos.to(row.device)
+                    row_vis = row.index_select(dim=-1, index=vis_pos_dev) # (num_heads, N_vision)
+                    bucket["per_layer_vision_attn"][layer_idx_local] = (
+                        row_vis.detach().to("cpu", torch.float32)
+                    )
+                    bucket.setdefault("captured_q_len", int(q_len))
+                    captured["done"] = True
+                attn_weights = None
+
+            return attn_output, attn_weights, past_kv
+
+        return self_attn, orig_forward, patched_forward
+
+    try:
+        for L in layer_idxs:
+            captured = {"done": False}
+            self_attn, orig_forward, pf = make_patched_forward(L, captured)
+            self_attn.forward = MethodType(pf, self_attn)
+            patched.append((self_attn, orig_forward))
+        yield bucket
+    finally:
+        for self_attn, orig_forward in patched:
+            self_attn.forward = orig_forward
+
+
 __all__ = [
     "PromptIndex",
     "locate_prompt_landmarks",
     "patch_attention_capture",
+    "patch_attention_capture_multilayer",
     "predict_with_attention",
     "resolve_vision_token_ids",
 ]

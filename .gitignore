@@ -134,3 +134,11 @@ code/third_party/
 # ---------- launch scripts (contain absolute /apdcephfs paths, not for public push) ----------
 # Internal copies live in docs/_internal/scripts_internal/
 scripts/
+
+# ---------- local artifacts (do not commit) ----------
+backups/
+results/raw/
+results/profiling/
+STOP_*
+landscape_queue.txt
+*.zip

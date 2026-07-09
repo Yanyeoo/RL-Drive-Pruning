@@ -1,60 +1,94 @@
 # 给下一个 AI 的开场白（直接复制发给它）
 
-> 写于 2026-06-18 16:10。上一个 AI 17:00 被回收，无记忆传递。
+> **当前版本写于 2026-07-07 21:30**
+> 上一窗口(W2): 全 navtest 主表评测中，attn_L12 r=0.5 + scorer r=0.25/0.75 在跑。
+> 方法 = **动态 token selection (learned scorer) + 固定 r=0.5**。
+> Budget Policy 已证明负面(§11)并撤销。
 
 ---
 
-## 复制下面这一整段发给新 AI：
+## 复制下面发给新 AI：
 
 ```
-你好，接手 RL-Drive-Pruning 项目。前一个 AI session 在 17:00 被回收，无记忆传递。
-GPU 从 4×H20 降到 2×H20。
+你好，接手 RL-Drive-Pruning（AutoVLA + NAVSIM vision token pruning）。上一 session 无记忆。
 
-【第一件事 — 强制】
-不要做任何动作。先按顺序读完这 3 个文件：
+【硬规则 #0 — 任何动作前读完这些文件】
 
-1. /apdcephfs/private_shayladeng/tokenrl_autoVLA/RESUME_TOMORROW.md
-2. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/_internal/handoff_2026-06-18_session_death.md
-3. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/_internal/incident_2026-06-18_false_stall_diagnosis.md
+1. 按顺序读：
+   a. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/journal/2026-07-07.md
+      （本窗口全记录：事实核验、claim①根因分析、safety-net FAIL、策略决定）
+   b. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/journal/2026-07-07_decision_safety_net.md
+      （自主决策记录：safety-net 不可行 + 最终 framing 策略）
+   c. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/results/key_results.md §12
+      （全 navtest 主表数字 + 分层分析）
+   d. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/journal/HANDOFF_2026-07-06_W2.md
+      （W1→W2 交接，含方向 pivot 和全量主表计划）
 
-读完用一段话告诉我：
-- navtrain 现在在什么状态？（哪些已完成、哪些还在跑、哪些进程不能动）
-- 用户已经做了什么决定？（关于 M1.a 在 navtest 还是 navtrain 上跑）
-- 你接下来第一个具体动作是什么？（必须是 Step 0 sanity，不能直接跑 smoke）
+2. 读完后回答：
+   - scorer r=0.5 全 navtest PDMS 多少？vs r=1.0 差多少？为什么？
+   - claim① 底线（≤0.5pt）为什么被打破？根因是什么？
+   - 当前 dispatcher 在跑什么？还有哪些 arm 没完成？
+   - 下一步最高优先级是什么？
 
-【硬规则】
-1. 不要重启 navtrain 下载脚本或任何后台 rsync
-2. 不要对 _staging_navtrain/ 做 tar/mv/rsync 操作（前任踩过 2 次）
-3. 不要 push GitHub（没授权）
-4. 关键数字（PDMS/L*/sanity）必须当场写 docs/results/key_results.md
-5. 不确定就停下来问，不要自己改
+3. 回答不上就重读，不要碰代码。
 
-【工作目录】
-/apdcephfs/private_shayladeng/tokenrl_autoVLA
+【项目当前状态 snapshot】
 
-【当前 milestone】
-- M0 baseline ✅ B0 navtest PDMS=89.83 locked
-- M0.2 navtrain 数据 🔄 后台 rsync 中（不阻塞）
-- M1.a attention probe 🎯 你的任务，已确认在 navtest 上跑
+■ 方法：driving-conditioned token Importance Scorer (MLP, 0.6M params)
+  - 输入：ViT→LLM layer-0 vision embeddings (720×2048) + camera_id
+  - 输出：per-token importance score → top-B selection (B = r × 720)
+  - 训练：LambdaRank SFT on L12 attention labels (4000 navtrain scenes)
+  - ckpt: ckpt/s3_token_scorer/
 
-开始读文档。
+■ 核心结果（全 navtest N≈11570）：
+  - scorer r=0.5 PDMS = 0.8920
+  - r=1.0 no-prune PDMS = 0.8988
+  - random r=0.5 PDMS = 0.8635
+  - scorer − r=1.0 = −0.69pt (claim① 底线 −0.5pt 被略超)
+  - scorer − random = +2.84pt (claim③ 很强)
+  - attn_L12 r=0.5: IN PROGRESS (今晚跑完)
+
+■ claim① 根因：
+  - 50% 的 navtest 场景 r1>0.95（"满分"），50% 剪枝必然扰动 → −2pt
+  - 困难场景(r1<0.8) scorer 反而 +18.7pt above baseline
+  - 这是 50% pruning 的结构性代价，不是 scorer 错误
+  - safety-net (检测 scorer uncertainty) 不可行（scorer confidently wrong）
+
+■ 评测 dispatcher 状态：
+  - nohup bash scripts/run_s3_maintable_full_navtest.sh 在跑
+  - ARM 顺序：attn_L12 0.5 → scorer 0.25 → scorer 0.75
+  - SKIP_DONE 自动跳已完成 arm，直接重启脚本即可续跑
+  - 已完成 12/24 jobs，预计能完成 ~20/24 by 回收时间
+
+■ 下一步优先级：
+  1. 等 attn_L12 r=0.5 完成 → 确认 claim③ (scorer > attn selector)
+  2. 聚合 all arms → python3 scripts/s3_aggregate_maintable.py
+  3. 搭建 FastV baseline (论文主表还缺 FastV / FastV-selector-at-input)
+  4. 可选：scorer 扩训到 19k（减少灾难场景但不解决满分区退化）
+
+■ 关键守则：
+  - 每个决策先事实核验
+  - 起进程前 pgrep 查残留
+  - 改文件前 cp -a 备份
+  - 偏离 design doc 当场写 journal
+  - 实时更新 todo
+
+■ 环境：
+  - Python: /apdcephfs/private_shayladeng/miniconda3/envs/autovla/bin/python
+  - 环境变量: source scripts/setup_navsim_env_vars.sh
+  - 项目根: /apdcephfs/private_shayladeng/tokenrl_autoVLA
 ```
 
 ---
 
-## 为什么这么写
+## 关键文件速查
 
-- **第一段就给"不要做什么"**：上一个 AI 反复踩同一类坑（看到怪状态就改），新 AI 必须先冷静读文档
-- **强制汇报 3 个具体问题**：避免 AI 假装看完就开干，3 个问题答不上来 = 没读
-- **GPU 降级单独提**：避免 AI 复用 4 卡分片脚本崩
-- **硬规则浓缩成 5 条**：每条都对应今天踩的具体坑
-- **第一个动作钉死是 Step 0 sanity**：避免 AI 直接 launch smoke 然后炸
-
----
-
-## 如果新 AI 不听话
-
-如果它跳过文档直接开始动手，立刻打断：
-
-> 停。你没按规则读文档。把 RESUME_TOMORROW.md 和 handoff_2026-06-18_session_death.md 读完，
-> 然后回答我那 3 个问题，再开始干。
+| 文件 | 用途 |
+|---|---|
+| `docs/results/key_results.md` | 唯一权威数字表 |
+| `docs/plan/design_decisions.md` | 方法设计决策（含 Revision 2026-07-06 撤销 Budget Policy）|
+| `docs/plan/s3_execution_plan.md` | S3 执行计划（168卡时/周模式）|
+| `docs/journal/2026-07-07.md` | 今日全记录 |
+| `results/raw/tokenprune_S3_full/` | 全 navtest eval CSVs |
+| `scripts/run_s3_maintable_full_navtest.sh` | 主表评测 dispatcher |
+| `scripts/s3_aggregate_maintable.py` | 聚合脚本 |

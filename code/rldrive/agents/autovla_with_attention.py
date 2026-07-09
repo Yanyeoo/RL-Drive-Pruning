@@ -50,6 +50,7 @@ from rldrive.scoring.attention_capture import (
     locate_prompt_landmarks,
     patch_attention_capture,
     patch_attention_capture_multilayer,
+    patch_vision_feature_capture,
     resolve_vision_token_ids,
 )
 
@@ -97,6 +98,13 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
         # ---- M1.b Level-0 additions ----
         head_mask_layers: Optional[Dict[int, List[int]]] = None,
         head_mask_verbose: bool = False,
+        # ---- S3 addition: per-token feature capture (ViT->LLM interface) ----
+        # If enabled, capture the hidden state entering decoder layer
+        # `feature_layer_idx` at the vision positions -> (N_vision, H) per scene,
+        # saved to feature_save_dir. Disabled -> zero hooks (upstream-identical).
+        feature_capture_enabled: bool = False,
+        feature_layer_idx: int = 0,
+        feature_save_dir: Optional[str] = None,
     ):
         super().__init__(
             trajectory_sampling=trajectory_sampling,
@@ -135,6 +143,13 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
                 if heads:
                     self._head_mask_layers[int(k)] = heads
         self._head_mask_verbose = bool(head_mask_verbose)
+
+        # S3 feature capture state (additive; off by default)
+        self._feat_enabled = bool(feature_capture_enabled)
+        self._feat_layer_idx = int(feature_layer_idx)
+        self._feat_save_dir = Path(feature_save_dir) if feature_save_dir else None
+        if self._feat_enabled and self._feat_save_dir is not None:
+            self._feat_save_dir.mkdir(parents=True, exist_ok=True)
 
         # Sanity: refuse to silently fail if model loaded under sdpa/flash where
         # `attn_weights` would never be exposed. autovla.py:510 defaults to eager
@@ -271,6 +286,28 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
             "average_heads": self._attn_average_heads,
         }, self._attn_save_dir / f"{tag}.pt")
 
+    def _save_feature(self, scene_token: Optional[str], feat_bucket: Dict[str, Any],
+                      prompt_index: PromptIndex) -> None:
+        """Save per-vision-token features (N_vision, H) for the S3 scorer."""
+        if self._feat_save_dir is None:
+            return
+        tag = scene_token or f"featcall{self._attn_call_idx:06d}"
+        if "vision_feat" not in feat_bucket:
+            sentinel = self._feat_save_dir / f"{tag}.MISSING.json"
+            sentinel.write_text(json.dumps({
+                "reason": "vision_feat not captured during pre-fill",
+                "feature_layer_idx": self._feat_layer_idx,
+                "n_vision": int(prompt_index.n_vision),
+            }))
+            return
+        torch.save({
+            "vision_feat": feat_bucket["vision_feat"],                       # (N_vision, H) fp32 cpu
+            "vision_token_positions": prompt_index.vision_token_positions.cpu(),
+            "vision_blocks": prompt_index.vision_blocks,
+            "captured_seq_len": feat_bucket.get("captured_seq_len"),
+            "feature_layer_idx": self._feat_layer_idx,
+        }, self._feat_save_dir / f"{tag}.pt")
+
     # ------------------------------------------------------------------
     # Override
     # ------------------------------------------------------------------
@@ -302,10 +339,11 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
         # (capture needs it; mask doesn't, but cheap to skip when not needed)
         prompt_index: Optional[PromptIndex] = None
         input_ids: Optional[torch.Tensor] = None
-        if self._attn_enabled:
+        if self._attn_enabled or self._feat_enabled:
             prompt_index, input_ids = self._build_prompt_index(features)
 
         bucket: Dict[str, Any] = {}
+        feat_bucket: Dict[str, Any] = {}
 
         # ---- Compose contexts via ExitStack so any subset can be active ----
         with ExitStack() as stack:
@@ -337,6 +375,15 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
                             average_heads=self._attn_average_heads,
                         )
                     )
+            if self._feat_enabled:
+                stack.enter_context(
+                    patch_vision_feature_capture(
+                        vlm=self.autovla.vlm,
+                        layer_idx=self._feat_layer_idx,
+                        prompt_index=prompt_index,
+                        bucket=feat_bucket,
+                    )
+                )
             with torch.no_grad():
                 poses, cot_results = self.autovla.predict(features)
 
@@ -360,6 +407,11 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
             self._attn_call_idx += 1
 
         # ---- end attention capture ----
+
+        if self._feat_enabled:
+            assert prompt_index is not None
+            scene_token = self._extract_scene_token(scene_data)
+            self._save_feature(scene_token, feat_bucket, prompt_index)
 
         submission = False
         if submission:

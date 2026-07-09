@@ -432,11 +432,68 @@ def patch_attention_capture_multilayer(
             self_attn.forward = orig_forward
 
 
+# ---------------------------------------------------------------------------
+# S3 — per-token feature capture (ViT->LLM interface hidden states)
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def patch_vision_feature_capture(
+    vlm,
+    layer_idx: int,
+    prompt_index: PromptIndex,
+    bucket: Optional[Dict] = None,
+):
+    """Capture the per-vision-token hidden state ENTERING decoder ``layer_idx``.
+
+    This is the ViT features after the visual projector (for layer_idx=0 it is
+    exactly the LLM-input embedding at the vision positions = design Q2 T1
+    "ViT output端, projector 之后、LLM 输入之前"). Used as the S3 token
+    Importance Scorer input (docs/specs/s3_token_scorer_spec.md §2.2).
+
+    Patches ``vlm.model.layers[layer_idx].forward``; on the FIRST (pre-fill)
+    call it reads the incoming ``hidden_states`` (bsz=1, seq_len, H), selects the
+    ``prompt_index.vision_token_positions`` rows, stores ``(N_vision, H)`` on CPU
+    fp32 into ``bucket['vision_feat']`` and auto-restores. Decode steps
+    (seq_len==1, or already captured) are passed through untouched.
+
+    Same one-shot / non-invasive pattern as ``patch_attention_capture``; does NOT
+    modify third_party. No-op semantics preserved when disabled by the caller.
+    """
+    if bucket is None:
+        bucket = {}
+
+    layer = vlm.model.layers[layer_idx]
+    orig_forward = layer.forward
+    captured = {"done": False}
+    vis_pos = prompt_index.vision_token_positions
+
+    def patched_forward(self, hidden_states, *args, **kwargs):
+        if not captured["done"] and hidden_states is not None:
+            hs = hidden_states
+            # expect (bsz=1, seq_len, H); guard against unexpected shapes
+            if hs.dim() == 3 and hs.shape[0] == 1 and hs.shape[1] > 1:
+                seq_len = hs.shape[1]
+                vp = vis_pos.to(hs.device)
+                if int(vp.max()) < seq_len:
+                    feat = hs[0].index_select(0, vp)          # (N_vision, H)
+                    bucket["vision_feat"] = feat.detach().to("cpu", torch.float32)
+                    bucket["captured_seq_len"] = int(seq_len)
+                    captured["done"] = True
+        return orig_forward(hidden_states, *args, **kwargs)
+
+    layer.forward = MethodType(patched_forward, layer)
+    try:
+        yield bucket
+    finally:
+        layer.forward = orig_forward
+
+
 __all__ = [
     "PromptIndex",
     "locate_prompt_landmarks",
     "patch_attention_capture",
     "patch_attention_capture_multilayer",
+    "patch_vision_feature_capture",
     "predict_with_attention",
     "resolve_vision_token_ids",
 ]

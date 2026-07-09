@@ -92,3 +92,12 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
 - No change to `code/third_party/AutoVLA`.
 
 **Est effort**: ~1 day code + 0.5 day lossless verification (CPU/1-GPU smoke). No large GPU run in S1.
+---
+
+## 6. Post-implementation correction — M-RoPE interaction (2026-07-04, GPU verify)
+
+**Original Variant-A assumption ("2D-mask padding does NOT touch M-RoPE") was WRONG.** On GPU verify of r<1.0, Qwen2.5-VL `forward` calls `get_rope_index()` on pre-fill, and `get_rope_index` **uses the 2D attention_mask to locate the vision block** to compute 3D M-RoPE positions. Zeroing pruned vision columns first corrupts that block → `ValueError: <video_token_id> is not in list`.
+
+**Fix (in `token_prune_patch.py`, no third_party edit)**: in the forward pre-hook, on the pre-fill call (2D mask, `position_ids is None`, seq_len>1), precompute `position_ids, rope_deltas = vlm.get_rope_index(input_ids, image_grid_thw, video_grid_thw, second_per_grid_ts, ORIGINAL_unmasked_mask)`, set `vlm.rope_deltas`, and inject `position_ids` into the forward kwargs. With `position_ids` provided, `forward` skips `get_rope_index`; the masked attention_mask then only affects attention (positions stay intact = faithful Variant-A semantics). Decode steps (seq_len==1) hit the cached-`rope_deltas` branch and are untouched.
+
+**Verified**: r=1.0 byte-identical to vanilla (lossless); r=0.5/0.25 run rc=0 with prune genuinely changing output (r=0.1 changed PDMS 0.9417→0.9315). Also fixed an unrelated bug: `_score_for` referenced non-existent `self.device` (removed the unused param).

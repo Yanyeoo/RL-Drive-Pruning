@@ -126,6 +126,41 @@ def patch_vision_token_prune(
         am = kwargs.get("attention_mask", None)
         if am is not None and am.dim() == 2:
             kwargs = dict(kwargs)
+            # --- M-RoPE fix (Qwen2.5-VL) ---
+            # Qwen2.5-VL.forward computes 3D M-RoPE via get_rope_index() using the
+            # 2D attention_mask to locate the vision block. If we zero pruned vision
+            # columns BEFORE that, get_rope_index sees a broken vision block and
+            # raises "video_token_id not in list". Fix: on the pre-fill call,
+            # precompute position_ids with the ORIGINAL (unmasked) mask and inject
+            # them (+ cache rope_deltas). forward then skips get_rope_index, so our
+            # masked mask only affects attention — positions stay intact (faithful
+            # Variant-A semantics). Decode steps (seq_len==1) use the cached
+            # rope_deltas branch and are left untouched here.
+            input_ids = kwargs.get("input_ids", None)
+            if input_ids is None and len(args) > 0:
+                input_ids = args[0]
+            if (
+                kwargs.get("position_ids", None) is None
+                and input_ids is not None
+                and input_ids.dim() >= 1
+                and input_ids.shape[-1] > 1
+            ):
+                position_ids, rope_deltas = vlm.get_rope_index(
+                    input_ids,
+                    kwargs.get("image_grid_thw", None),
+                    kwargs.get("video_grid_thw", None),
+                    kwargs.get("second_per_grid_ts", None),
+                    am,  # ORIGINAL unmasked mask -> intact vision block
+                )
+                vlm.rope_deltas = rope_deltas
+                kwargs["position_ids"] = position_ids
+                if verbose and not state.get("rope_done", False):
+                    state["rope_done"] = True
+                    print(
+                        f"[token_prune] precomputed M-RoPE position_ids on prefill "
+                        f"(seq_len={int(input_ids.shape[-1])}) before masking",
+                        flush=True,
+                    )
             kwargs["attention_mask"] = _apply(am)
             state["n_masked"] += 1
             if verbose and state["n_masked"] == 1:

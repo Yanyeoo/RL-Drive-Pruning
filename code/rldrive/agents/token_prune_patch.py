@@ -186,4 +186,45 @@ def patch_vision_token_prune(
         vlm.forward = orig_forward
 
 
-__all__ = ["select_prune_positions", "patch_vision_token_prune"]
+def select_prune_positions_taucut(
+    vision_token_positions: torch.Tensor,
+    score: torch.Tensor,
+    tau: float,
+    min_keep: int = 36,  # minimum 5% of 720 = 36 tokens always kept
+) -> torch.Tensor:
+    """Return absolute sequence indices of the vision tokens to PRUNE using
+    a global threshold τ (τ-cut): keep tokens with score > τ, prune the rest.
+
+    Unlike top-B (`select_prune_positions`), this produces a **variable**
+    keep_ratio per scene — the key ingredient of route-B "unified adaptive".
+
+    Args:
+        vision_token_positions: (N,) long, absolute indices.
+        score: (N,) float, importance per vision token (higher = keep).
+        tau: global threshold. Tokens with score > tau are kept.
+        min_keep: minimum number of tokens to keep (safety floor).
+
+    Returns:
+        (N - n_kept,) long tensor of absolute positions to mask out.
+    """
+    vp = vision_token_positions.flatten()
+    n = int(vp.numel())
+    s = score.flatten().to(torch.float32)
+    assert s.numel() == n
+
+    keep_mask = s > tau  # bool (N,)
+    n_keep = int(keep_mask.sum().item())
+
+    # Safety floor: if fewer than min_keep pass threshold, keep top-min_keep
+    if n_keep < min_keep:
+        topk_idx = s.topk(min_keep).indices
+        keep_mask = torch.zeros(n, dtype=torch.bool)
+        keep_mask[topk_idx] = True
+        n_keep = min_keep
+
+    prune_local = torch.where(~keep_mask)[0]
+    prune_pos = vp[prune_local.to(torch.long)]
+    return prune_pos.to(torch.long).sort().values
+
+
+__all__ = ["select_prune_positions", "select_prune_positions_taucut", "patch_vision_token_prune"]

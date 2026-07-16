@@ -781,7 +781,56 @@ not a scorer quality issue. Pareto at r=0.75 (in progress) should show much smal
 | **②** | adaptive budget > fixed ratio | **NEGATIVE** (§11) | 6 configs all < fixed r=0.5; oracle headroom not learnable |
 | **③** | scorer >> attn/random selectors | **✅ CONFIRMED** | +0.18pt vs attn_L12, +2.84pt vs random, at iso-compute r=0.5 |
 
-### 12.6 Pending (will update after remaining arms complete)
-- scorer r=0.25, r=0.75 → Pareto curve points (running, ETA ~6h)
-- Updated aggregate with all 6 arms
-- FastV / FastV-selector-at-input baselines (next priority after Pareto)
+### 12.6 Pareto curve (completed 2026-07-10)
+
+| ratio | PDMS | Δ vs r=1.0 | FLOPs saving (LLM prefill) |
+|---|---|---|---|
+| r=1.0 (no-prune) | 0.8988 | — | 0% |
+| **r=0.75** | **0.8983** | **−0.05pt** | 16.9% |
+| r=0.5 | 0.8920 | −0.69pt | 33.6% |
+| r=0.25 | 0.8508 | −4.80pt | 49.9% |
+
+**Key insight**: r=0.75 is effectively "free lunch" (−0.05pt ≈ noise level, within run-to-run variance).
+Flat region = [0.75, 1.0]. Knee = between r=0.5 and r=0.75. Cliff onset = r < 0.5.
+
+**Statistical test (paired, N=11568)**:
+- r=0.75 vs r=1.0: Δ = −0.047pt, **p=0.581 (NOT significant)**, Cohen's d=0.005, 95% CI=[−0.21,+0.12]pt
+- r=0.5 vs r=1.0: Δ = −0.678pt, p=6.9e-7 (significant), Cohen's d=0.046, 95% CI=[−0.95,−0.41]pt
+- **Conclusion**: 25% token removal (r=0.75) is statistically indistinguishable from no pruning.
+  50% token removal (r=0.5) is statistically significant but with negligible effect size (d<0.05).
+
+**Pareto narrative for paper**:
+- r=0.75: near-lossless operating point (16.9% FLOPs saving @ ~0 quality cost)
+- r=0.5: sweet-spot (33.6% FLOPs saving @ −0.69pt, still dominating all baselines)
+- r=0.25: aggressive regime (49.9% FLOPs saving but −4.80pt degradation)
+
+### 12.7 LambdaRank vs MSE ablation (completed 2026-07-10)
+
+Same data (4000 navtrain, L12 attention labels), same architecture, only loss differs:
+
+| Metric | LambdaRank (ours) | MSE (pointwise) | Δ |
+|---|---|---|---|
+| test pairwise_acc | **0.8388** | 0.7440 | **+9.5pt** |
+| test NDCG@360 | **0.8745** | 0.8450 | **+3.0pt** |
+
+**Conclusion**: Listwise (LambdaRank) ranking loss substantially outperforms pointwise MSE regression
+for token importance scoring. This validates C1 method novelty — the listwise formulation is a
+principled choice, not a convenience. MSE scorer ckpt: `ckpt/s3_token_scorer_mse/`.
+
+Additional offline analysis (Spearman rank correlation with L12 attention on 100 test scenes):
+- LambdaRank: ρ = **0.8644** (std=0.028)
+- MSE: ρ = 0.6786 (std=0.052)
+- Δ = **+0.186** (18.6 absolute points)
+
+### 12.8 FastV-at-input baseline (in progress 2026-07-10)
+
+- FastV-selector-at-input = LLM layer-2 attention as importance score, prune at ViT→LLM interface
+- Same eval setup (Variant A attn-mask), same ratios (r=0.5, r=0.75)
+- Purpose: isolate "selector quality gain" from "pruning position gain" vs FastDriveVLA
+- Status: running on 2×H20, ETA r=0.5 complete ~21:30
+- Expected: fastv_l2 r=0.5 PDMS ∈ [0.864, 0.892] (between random and scorer)
+
+### 12.9 Pending
+- FastV r=0.5 results (ETA tonight)
+- MSE scorer PDMS eval (supplementary, if time permits)
+- FastV r=0.75 (lower priority, partial OK)

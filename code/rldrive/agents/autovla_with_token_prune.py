@@ -38,7 +38,9 @@ from rldrive.agents.autovla_with_attention import AutoVLAWithAttentionAgent
 from rldrive.agents.token_prune_patch import (
     patch_vision_token_prune,
     select_prune_positions,
+    select_prune_positions_taucut,
 )
+from rldrive.agents.token_prune_patch_varB import patch_vision_token_drop
 from rldrive.scoring.attention_capture import patch_attention_capture, patch_vision_feature_capture
 from rldrive.scoring.token_scorer import ScorerRunner
 
@@ -67,6 +69,9 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
         # ---- S3 learned-scorer selector ----
         scorer_ckpt: Optional[str] = None,   # dir with checkpoint.pt/config.json/feature_norm.pt
         scorer_feat_layer: int = 0,
+        # ---- τ-cut (route B: calibrated scorer + global threshold) ----
+        tau: Optional[float] = None,         # global threshold for scorer_taucut mode
+        tau_min_keep: int = 36,              # minimum tokens to keep (safety floor)
         # ---- safety-net fallback (scorer only) ----
         safety_net: bool = False,            # enable uncertainty-based fallback to r=1.0
         safety_entropy_thresh: float = 0.92, # normalized entropy threshold (0-1, higher=more flat)
@@ -101,13 +106,16 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
         self._safety_temperature = float(safety_temperature)
         self._safety_net_triggers = 0  # counter for monitoring
 
-        if self._prune_variant != "attn_mask":
+        # τ-cut config
+        self._tau = tau if tau is not None else None
+        self._tau_min_keep = int(tau_min_keep)
+
+        if self._prune_variant not in ("attn_mask", "drop"):
             raise NotImplementedError(
-                f"prune_variant='{self._prune_variant}' not implemented in S1. "
-                f"Only 'attn_mask' (Variant A) is available; true-drop (Variant B) "
-                f"is S3 and needs M-RoPE position recompute."
+                f"prune_variant='{self._prune_variant}' not implemented. "
+                f"Available: 'attn_mask' (Variant A), 'drop' (Variant B, true token drop)."
             )
-        if self._selector not in ("attn_L12", "random", "scorer", "fastv_l2"):
+        if self._selector not in ("attn_L12", "random", "scorer", "scorer_taucut", "fastv_l2"):
             raise ValueError(f"unknown selector '{self._selector}'")
         # FastV-at-input baseline: uses layer-2 attention as selector at ViT→LLM
         # interface (same position as ours). This isolates "selector quality" gain
@@ -116,18 +124,22 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
             self._score_layer = 2
 
         self._scorer = None
-        if self._selector == "scorer":
+        if self._selector in ("scorer", "scorer_taucut"):
             if not scorer_ckpt:
-                raise ValueError("selector='scorer' requires scorer_ckpt=<dir>")
+                raise ValueError(f"selector='{self._selector}' requires scorer_ckpt=<dir>")
+            if self._selector == "scorer_taucut" and self._tau is None:
+                raise ValueError("selector='scorer_taucut' requires tau=<float>")
             dev = "cuda" if (not skip_model_load) else "cpu"
             self._scorer = ScorerRunner(scorer_ckpt, device=dev)
             print(f"[AutoVLAWithTokenPruneAgent] loaded scorer from {scorer_ckpt} "
-                  f"(feat_layer={self._scorer_feat_layer})", flush=True)
+                  f"(feat_layer={self._scorer_feat_layer})"
+                  f"{f', tau={self._tau}' if self._tau is not None else ''}", flush=True)
 
         print(
             f"[AutoVLAWithTokenPruneAgent] keep_ratio={self._keep_ratio} "
             f"selector={self._selector} score_layer={self._score_layer} "
-            f"variant={self._prune_variant} safety_net={self._safety_net}",
+            f"variant={self._prune_variant} safety_net={self._safety_net}"
+            f"{f' tau={self._tau}' if self._tau is not None else ''}",
             flush=True,
         )
 
@@ -167,7 +179,7 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
             seed = int(hashlib.md5((scene_token or "x").encode()).hexdigest()[:8], 16)
             g = torch.Generator().manual_seed(seed)
             return torch.rand(n, generator=g)
-        if self._selector == "scorer":
+        if self._selector in ("scorer", "scorer_taucut"):
             # pass-1: capture layer-`scorer_feat_layer` vision features, then MLP
             fbucket: Dict[str, Any] = {}
             with patch_vision_feature_capture(
@@ -217,7 +229,26 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
 
         prune_positions: Optional[torch.Tensor] = None
 
-        if self._keep_ratio < 1.0:
+        # τ-cut mode: always score + threshold (keep_ratio is ignored)
+        if self._selector == "scorer_taucut":
+            prompt_index, _input_ids = self._build_prompt_index(features)
+            n = prompt_index.n_vision
+            scene_token = self._extract_scene_token(scene_data)
+            score = self._score_for(scene_token, n, features, prompt_index)
+            prune_positions = select_prune_positions_taucut(
+                vision_token_positions=prompt_index.vision_token_positions,
+                score=score,
+                tau=self._tau,
+                min_keep=self._tau_min_keep,
+            )
+            if self._prune_verbose:
+                n_keep = n - int(prune_positions.numel())
+                print(
+                    f"[token_prune] τ-cut scene={scene_token} N={n} tau={self._tau} "
+                    f"-> keep {n_keep}/{n} ({n_keep/n:.3f}), prune {int(prune_positions.numel())}",
+                    flush=True,
+                )
+        elif self._keep_ratio < 1.0:
             prompt_index, _input_ids = self._build_prompt_index(features)
             n = prompt_index.n_vision
             scene_token = self._extract_scene_token(scene_data)
@@ -246,15 +277,26 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
                         flush=True,
                     )
 
-        # pass-2: generate under prune mask (no-op if prune_positions empty)
+        # pass-2: generate under pruning (no-op if prune_positions empty)
         with ExitStack() as stack:
-            stack.enter_context(
-                patch_vision_token_prune(
-                    vlm=self.autovla.vlm,
-                    prune_positions=prune_positions,
-                    verbose=self._prune_verbose,
+            if self._prune_variant == "drop":
+                # Variant B: physically remove tokens from sequence (real FLOPs saving)
+                stack.enter_context(
+                    patch_vision_token_drop(
+                        vlm=self.autovla.vlm,
+                        prune_positions=prune_positions,
+                        verbose=self._prune_verbose,
+                    )
                 )
-            )
+            else:
+                # Variant A: mask tokens in attention (quality proxy, no FLOPs saving)
+                stack.enter_context(
+                    patch_vision_token_prune(
+                        vlm=self.autovla.vlm,
+                        prune_positions=prune_positions,
+                        verbose=self._prune_verbose,
+                    )
+                )
             with torch.no_grad():
                 poses, cot_results = self.autovla.predict(features)
 

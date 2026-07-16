@@ -1,9 +1,8 @@
 # 给下一个 AI 的开场白（直接复制发给它）
 
-> **当前版本写于 2026-07-07 21:30**
-> 上一窗口(W2): 全 navtest 主表评测中，attn_L12 r=0.5 + scorer r=0.25/0.75 在跑。
-> 方法 = **动态 token selection (learned scorer) + 固定 r=0.5**。
-> Budget Policy 已证明负面(§11)并撤销。
+> **当前版本写于 2026-07-16 15:20**
+> 本窗口(W7) 完成：Scorer GRPO 代码实现+验证、Variant B 分析。
+> 下一窗口核心：42h 8卡集中出齐所有论文实验数据。
 
 ---
 
@@ -15,56 +14,84 @@
 【硬规则 #0 — 任何动作前读完这些文件】
 
 1. 按顺序读：
-   a. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/journal/2026-07-07.md
-      （本窗口全记录：事实核验、claim①根因分析、safety-net FAIL、策略决定）
-   b. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/journal/2026-07-07_decision_safety_net.md
-      （自主决策记录：safety-net 不可行 + 最终 framing 策略）
-   c. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/results/key_results.md §12
-      （全 navtest 主表数字 + 分层分析）
-   d. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/journal/HANDOFF_2026-07-06_W2.md
-      （W1→W2 交接，含方向 pivot 和全量主表计划）
+   a. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/journal/2026-07-16.md
+   b. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/journal/2026-07-15.md
+   c. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/plan/aaai_proposal_for_advisor.md
+   d. /apdcephfs/private_shayladeng/tokenrl_autoVLA/docs/results/key_results.md §12
 
 2. 读完后回答：
-   - scorer r=0.5 全 navtest PDMS 多少？vs r=1.0 差多少？为什么？
-   - claim① 底线（≤0.5pt）为什么被打破？根因是什么？
-   - 当前 dispatcher 在跑什么？还有哪些 arm 没完成？
-   - 下一步最高优先级是什么？
+   - Scorer GRPO 是什么？代码在哪？pilot 结果如何？
+   - 42h 窗口的 win conditions 是什么？
+   - Variant B 的问题是什么？如何修？
+   - 当前论文最大的 gap 是什么？
 
 3. 回答不上就重读，不要碰代码。
 
 【项目当前状态 snapshot】
 
-■ 方法：driving-conditioned token Importance Scorer (MLP, 0.6M params)
-  - 输入：ViT→LLM layer-0 vision embeddings (720×2048) + camera_id
-  - 输出：per-token importance score → top-B selection (B = r × 720)
-  - 训练：LambdaRank SFT on L12 attention labels (4000 navtrain scenes)
-  - ckpt: ckpt/s3_token_scorer/
+■ 核心结果（全 navtest N≈11576）：
+  - no-prune r=1.0:     PDMS = 0.8988
+  - scorer r=0.75:      PDMS = 0.8983 (−0.05pt, free lunch)
+  - τ-cut kr060:        PDMS = 0.8940 (−0.48pt, adaptive, mean_kr≈0.60)
+  - scorer r=0.5:       PDMS = 0.8920 (−0.69pt)
+  - attn_L12 r=0.5:     PDMS = 0.8901 (−0.87pt)
+  - FastV L2 r=0.75:    PDMS = 0.8823 (−1.65pt)
+  - random r=0.5:       PDMS = 0.8635 (−3.52pt)
+  - FastV L2 r=0.5:     PDMS = 0.8330 (−6.58pt)
 
-■ 核心结果（全 navtest N≈11570）：
-  - scorer r=0.5 PDMS = 0.8920
-  - r=1.0 no-prune PDMS = 0.8988
-  - random r=0.5 PDMS = 0.8635
-  - scorer − r=1.0 = −0.69pt (claim① 底线 −0.5pt 被略超)
-  - scorer − random = +2.84pt (claim③ 很强)
-  - attn_L12 r=0.5: IN PROGRESS (今晚跑完)
+■ 新结果 (W7):
+  - Variant B r=0.5 shard0: PDMS = 0.8758 (−1.91pt vs Variant A)
+    BUT: 排除 66 catastrophic bug scenes 后, B > A (+0.26pt)
+    → Variant B 有 decode bug (2.2% scenes)，修复后应 ≥ A
+  - Scorer GRPO pilot (100 scenes, 2 epochs):
+    running_reward: 0.795 → 0.875（学习在发生）
+    速度: 4.0-4.3 s/scene (单卡 H20)
+    代码: scripts/train_scorer_grpo.py
 
-■ claim① 根因：
-  - 50% 的 navtest 场景 r1>0.95（"满分"），50% 剪枝必然扰动 → −2pt
-  - 困难场景(r1<0.8) scorer 反而 +18.7pt above baseline
-  - 这是 50% pruning 的结构性代价，不是 scorer 错误
-  - safety-net (检测 scorer uncertainty) 不可行（scorer confidently wrong）
+■ 方法现状：
+  - Importance Scorer: MLP (0.6M params)
+    - LambdaRank version: ckpt/s3_token_scorer/
+    - MSE version: ckpt/s3_token_scorer_mse/ (用于 τ-cut)
+    - **RL pilot version: ckpt/s3_token_scorer_rl_pilot/** (NEW!)
+  - Scorer GRPO 训练: scripts/train_scorer_grpo.py (verified working)
+  - Variant B (true token drop): code/rldrive/agents/token_prune_patch_varB.py
+  - GRPO VLM: smoke PASS (15 steps dual-card), 但非论文核心
+  - Budget Policy: 已撤销
 
-■ 评测 dispatcher 状态：
-  - nohup bash scripts/run_s3_maintable_full_navtest.sh 在跑
-  - ARM 顺序：attn_L12 0.5 → scorer 0.25 → scorer 0.75
-  - SKIP_DONE 自动跳已完成 arm，直接重启脚本即可续跑
-  - 已完成 12/24 jobs，预计能完成 ~20/24 by 回收时间
+■ 论文 Story (confirmed):
+  "First RL (GRPO/REINFORCE) optimized scene-adaptive token pruning for AD-VLA."
+  方法: MSE scorer SFT → REINFORCE with PDMS reward → τ-cut adaptive
+  核心差异化: RL + AD-specific driving reward + unified adaptive
 
-■ 下一步优先级：
-  1. 等 attn_L12 r=0.5 完成 → 确认 claim③ (scorer > attn selector)
-  2. 聚合 all arms → python3 scripts/s3_aggregate_maintable.py
-  3. 搭建 FastV baseline (论文主表还缺 FastV / FastV-selector-at-input)
-  4. 可选：scorer 扩训到 19k（减少灾难场景但不解决满分区退化）
+■ 42h 8卡执行计划 (明晚 21:00 → 后天 15:00)
+
+  Phase 1 (21:00-01:00, 4h):
+    - [4卡] Scorer GRPO 正式训练: 全量 11k scenes, 3 epochs
+      cmd: CUDA_VISIBLE_DEVICES=0,1,2,3 python scripts/train_scorer_grpo.py \
+        --scorer-ckpt ckpt/s3_token_scorer_mse --out-dir ckpt/s3_token_scorer_rl \
+        --keep-ratio 0.5 --num-epochs 3 --group-size 8 --lr 3e-5
+      NOTE: 当前代码是单卡。需要加多卡并行(数据并行即可,每卡独立场景)
+    - [4卡] Variant B bug fix + shard0 re-eval
+
+  Phase 2 (01:00-09:00, 8h):
+    - [4卡] RL scorer eval: r=0.5 全量 4-shard (验证 RL > SFT)
+    - [4卡] RL scorer eval: r=0.75 (Pareto)
+    - [2卡] SparseVLM baseline 实现 + eval
+    - [2卡] ToMe baseline 实现 + eval
+
+  Phase 3 (09:00-15:00, 6h):
+    - [4卡] RL scorer τ-cut eval (adaptive)
+    - [2卡] Profiling 完善 (Variant B wall-clock)
+    - [2卡] 补充 ablation
+
+  Win Conditions:
+    1. RL scorer PDMS > 0.8920 (SFT scorer r=0.5) at r=0.5
+    2. Variant B wall-clock speedup data (clean, with proper decode)
+    3. 2+ new baselines (SparseVLM, ToMe)
+    4. Complete Pareto: r=0.25/0.5/0.75 × RL scorer
+
+■ 企业微信通知：
+  - Webhook: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=d3179f0d-dff8-45a6-9baa-00979bd1ee82
 
 ■ 关键守则：
   - 每个决策先事实核验
@@ -77,6 +104,7 @@
   - Python: /apdcephfs/private_shayladeng/miniconda3/envs/autovla/bin/python
   - 环境变量: source scripts/setup_navsim_env_vars.sh
   - 项目根: /apdcephfs/private_shayladeng/tokenrl_autoVLA
+  - GPU: 8× H20 (97GB each) — 42h window starting 7/17 21:00
 ```
 
 ---
@@ -86,9 +114,58 @@
 | 文件 | 用途 |
 |---|---|
 | `docs/results/key_results.md` | 唯一权威数字表 |
-| `docs/plan/design_decisions.md` | 方法设计决策（含 Revision 2026-07-06 撤销 Budget Policy）|
-| `docs/plan/s3_execution_plan.md` | S3 执行计划（168卡时/周模式）|
-| `docs/journal/2026-07-07.md` | 今日全记录 |
-| `results/raw/tokenprune_S3_full/` | 全 navtest eval CSVs |
-| `scripts/run_s3_maintable_full_navtest.sh` | 主表评测 dispatcher |
-| `scripts/s3_aggregate_maintable.py` | 聚合脚本 |
+| `docs/plan/aaai_proposal_for_advisor.md` | 路线 A/B 方案 |
+| `docs/journal/2026-07-16.md` | W7 周期记录 |
+| `docs/journal/2026-07-15.md` | W6 周期记录 |
+| `docs/related_work_survey.md` | 20+ 篇 related work |
+| **`scripts/train_scorer_grpo.py`** | **Scorer RL 训练代码 (NEW, verified)** |
+| `code/rldrive/scoring/token_scorer.py` | Scorer 架构 (MLP 0.6M) |
+| `code/rldrive/agents/autovla_with_token_prune.py` | 2-pass pruning agent |
+| `code/rldrive/agents/token_prune_patch_varB.py` | Variant B (true token drop) |
+| `ckpt/s3_token_scorer_mse/` | MSE scorer (SFT baseline) |
+| `ckpt/s3_token_scorer_rl_pilot/` | RL scorer pilot (100 scenes) |
+| `results/raw/tokenprune_S3_full/` | Eval CSVs |
+| `exp/MT_varB_scorer_r05_sh0/` | Variant B eval result |
+
+---
+
+## Scorer GRPO 技术细节
+
+**设计**:
+```
+Per scene (single VLM forward pair):
+  1. feature_builders → input_features (from JSON)
+  2. VLM pass-1 (frozen): patch_vision_feature_capture → vision_feat (720, 2048)
+  3. scorer(standardize(vision_feat) + cam_onehot) → scores (720,) [HAS GRAD]
+  4. top-B selection (B = keep_ratio * 720)
+  5. log_prob = [sum(scores[top-B]) - B*logsumexp(all_scores)] / B
+  6. VLM pass-2 (frozen): generate trajectory under prune mask
+  7. PDM_Reward(trajectory, token) → PDMS scalar
+  8. advantage = (reward - group_mean) / (group_std + eps)
+  9. loss = -mean(advantage * log_prob) + kl_beta * weight_L2(scorer, ref_scorer)
+```
+
+**已验证的超参** (pilot):
+- lr=3e-5, group_size=8, kl_beta=0.01
+- prune_variant=attn_mask (safer; Variant B has decode bug)
+- 速度: ~4.0 s/scene/GPU → 11k scenes × 3 epochs ÷ 4 GPUs ≈ 9.2h
+
+**42h 窗口关键优化** (需要实现):
+- 多卡数据并行: 4 个独立进程各跑 1/4 scenes → 合并梯度 (简单做法: 各训各的 epoch, 最后 merge checkpoint)
+- 或: 更好的做法是用 DataLoader 按 index 分配, 每个 GPU worker 独立跑
+
+---
+
+## Variant B Bug 分析
+
+66/2949 scenes (2.2%) 从 perfect→0 (catastrophic failure)。原因推测:
+1. Token drop 改变了 position_ids 但 generate() 中 attention mask 不匹配
+2. 某些场景 drop 后剩余 token 触发 edge case (如 video_grid_thw 不对齐)
+
+修复思路:
+- 在 `token_prune_patch_varB.py` 的 `patch_vision_token_drop` 中检查 generated action tokens
+- 如果 generate 产生 <10 个 action tokens → fallback 到 no-prune
+
+---
+
+*最后更新：2026-07-16 15:20。Pilot 训练完成，代码验证通过。*

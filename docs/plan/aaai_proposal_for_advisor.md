@@ -3,7 +3,7 @@
 > **日期**：2026-07-09 20:27 更新
 > **项目**：AutoVLA Vision Token Pruning
 > **AAAI 2027 DDL**：摘要 2026-07-21 / 全文 2026-07-28（**仅剩 19 天**）
-> **决策状态**：方案 A/B 待老师确认
+> **决策状态**：**路线 B 已确认（2026-07-10 user 决策）**
 
 ---
 
@@ -23,21 +23,27 @@
 
 ## 一、为什么我们要补自适应（framing 修正）
 
-### 今天发现的 C2 逻辑裂缝
+### 今天发现的关键认知修正：Claim② 没有被证伪
 
-之前的 C2 claim（"自适应预算不可学，triple-proof"）有一条腿是**被方法 artifact 污染的**：
+之前的 C2 claim（"自适应预算不可学，triple-proof"）**用词过度了**。准确状态是：**Claim② 在干净条件下根本没被测过**，两次负面结果都是机制受污染的。
 
-| 证据 | 测的问题 | 干净？ |
-|---|---|---|
-| §11 learned budget（6 configs） | ratio 是不是**场景特征**的函数 | ✅ 干净（从特征学不出 ratio） |
-| ReCogDrive predictor collapse | 换 backbone/benchmark，同上 | ✅ 干净 |
-| C-pilot τ-cut | ratio 能不能从 **scorer 分数**涌现 | ❌ **被 listwise 校准污染** |
+| 证据 | 测的问题 | 干净？ | 实际结论 |
+|---|---|---|---|
+| §11 learned budget（6 configs） | ratio 是不是**场景特征**的函数 | ✅ 干净 | 从场景特征学比例不行（只否定这一种机制） |
+| ReCogDrive predictor collapse | 换 backbone/benchmark，同上 | ✅ 干净 | 同上，跨设定一致 |
+| C-pilot τ-cut | ratio 能不能从 **scorer 分数**涌现 | ❌ **被 listwise 校准污染** | listwise 分数无跨帧绝对意义 → τ-cut 失败是预期的，不能证明自适应不行 |
 
-**关键发现**：我们的 LambdaRank scorer 是 **listwise**（只保证相对排序），分数没有跨帧绝对意义。所以全局 τ 截断当然不 transfer——这不是"自适应不行"，是"我们的 scorer 分数没校准"。
+**方法论判断**：
+- "证伪一个主张"需要排除所有合理机制。我们只排除了两种各有问题的机制，**没有排除最自然的那种（calibrated pointwise scorer + 全局 τ）**。
+- 所以 Claim② 的真实状态 = **untested under clean conditions + two confounded negatives**，不是 **falsified**。
+- 论文中绝对不能写"adaptive is falsified / unlearnable"。当前只能写"not demonstrated under tested setups"。
 
-**"学哪些"和"学多少"本质上是同一件事**：如果 scorer 输出有跨帧绝对意义（calibrated），那一个全局 τ 就能同时决定选什么 + 每帧留多少。不需要分开学比例。
+**核心 insight（"学哪些" = "学多少"）**：
+- LambdaRank 是 listwise → 只保证相对排序 → 分数没有跨帧绝对意义 → 全局 τ 不 transfer → 这是**方法选择的副作用**，不是自适应的本质局限
+- 如果 scorer 输出有跨帧绝对意义（calibrated/pointwise），那一个全局 τ 就能**同时决定选什么 + 每帧留多少** → "学哪些" = "学多少"，不需要分开学比例
+- 我们选了 listwise（为了超 teacher），结构性地排除了自适应能力，然后反过来宣布"自适应不可学"——**这里有部分循环论证**
 
-→ 之前的 "adaptive unlearnable" 是 over-claim。诚实的说法：**从场景特征学比例不行（§11 干净证明），但从 calibrated scorer 分数涌现比例还没测过。**
+→ 正确结论：**从场景特征学比例确实不行（§11 干净），但从 calibrated scorer 分数涌现比例是唯一没测的自然机制。在测它之前，Claim② 是悬而未决，不是已死。**
 
 ---
 
@@ -102,8 +108,20 @@
 - 同一 τ 下 per-scene ratio range = [0.20, 0.97]（自适应性确实涌现）
 - 但 aggregate PDMS 未 dominate fixed r=0.5（**注：被 listwise 校准问题污染，不是 clean test**）
 
-### 3.4 Cross-backbone（ReCogDrive, 0 GPU 已有数据）
-- Oracle headroom +7.35pt，但 predictor collapse → "从特征学比例"确实不行
+### 3.4 Cross-backbone validation（ReCogDrive, 0 GPU 已有数据）
+
+| | AutoVLA (ours) | ReCogDrive |
+|---|---|---|
+| Backbone | Qwen2.5-VL-3B | InternVL3-2B + DiT |
+| Benchmark | navtest (PDMS) | navhard (EPDMS) |
+| Oracle headroom | +2pt | +7.35pt |
+| Adaptive ratio 学习 | 6 configs 全负面 | predictor collapse |
+| Selector quality | scorer >> random (+2.84pt) | norm ≈ random (<0.007pt) |
+
+**结论**：
+- "从场景特征学 ratio" 在两个独立 backbone × benchmark × architecture 上都失败 → C2 跨设定验证
+- Selector quality 只在 AutoVLA 上有效（ReCogDrive DiT mean-pool 消除位置信息）→ C1 不做跨设定 claim
+- 论文中用于 C2 的 "Cross-backbone evidence" 章节，0 GPU 成本
 
 ---
 
@@ -145,19 +163,19 @@
 
 ---
 
-## 六、请老师决策
+## 六、决策记录
 
-**核心问题**：
+**2026-07-10 16:31 — User 确认走路线 B**
 
-> 我们的 τ-cut 失败被 listwise scorer 的校准问题污染了，不能干净证明自适应不行。我建议花 ~2 天重训 calibrated scorer + 真跑 τ-cut 去风险：赢了走 unified（B），输了 C2 变干净（A）。
->
-> 还是您觉得 19 天太紧，直接 commit A、把 C2 写成"natural setups 下无收益"、calibrated 留 future work？
+执行计划（2卡 H20，分窗口推进）：
+- 7/11: τ-cut shard0 quick test（3-4 个 τ，~4h）→ 当场定全量/回退
+- 7/11-7/12: τ-cut 全量（如果方向对）
+- 7/12-7/13: 补充实验（MSE eval / FastV r=0.75）
+- 7/14: 数据锁
+- 7/15-7/27: 写作
 
-**补充判断**：
-- C1（scorer 超 teacher，受控对照）不受影响，怎么走都 solid
-- B 如果成功 = "unified adaptive without budget controller"，比所有竞品都新颖
-- B 的 downside = 2 天实验成本；但即使失败也加固 A（不是纯赌）
-- 19 天能挤进 B，但写作时间从 13 天压缩到 11 天
+Win condition: τ-cut @ mean_kr≈0.5 PDMS > fixed r=0.5 (0.892)
+Fallback: 如果输 → 自动回退路线 A，C2 = clean negative
 
 ---
 

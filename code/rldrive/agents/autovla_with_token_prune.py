@@ -300,6 +300,23 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
             with torch.no_grad():
                 poses, cot_results = self.autovla.predict(features)
 
+        # Variant B safety fallback: a small subset of scenes can produce too few
+        # action tokens after true-drop sequence surgery. Re-run without pruning so
+        # these decode failures do not become artificial PDMS=0 catastrophes.
+        if self._prune_variant == "drop" and (
+            poses is None or poses.shape[0] < self._trajectory_sampling.num_poses
+        ):
+            if self._prune_verbose:
+                scene_token = self._extract_scene_token(scene_data)
+                got = None if poses is None else int(poses.shape[0])
+                print(
+                    f"[token_prune] VariantB fallback scene={scene_token}: got {got} poses, "
+                    f"need {self._trajectory_sampling.num_poses}; rerun no-prune",
+                    flush=True,
+                )
+            with torch.no_grad():
+                poses, cot_results = self.autovla.predict(features)
+
         return (
             Trajectory(poses[: self._trajectory_sampling.num_poses, :], self._trajectory_sampling),
             cot_results,

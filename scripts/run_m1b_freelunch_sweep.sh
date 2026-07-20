@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# ============================================================================
+# run_m1b_freelunch_sweep.sh — M1.b Level-0 free-lunch head-mask sweep dispatcher
+# ----------------------------------------------------------------------------
+# Runs N variants serially on the configured GPU. Each variant invokes
+# run_pdm_score_cot.py via navsim hydra entry, with the wrapped agent
+# (AutoVLAWithAttentionAgent) and a per-variant head_mask_layers dict.
+#
+# Spec: docs/specs/m1b_freelunch_spec.md
+#
+# Knobs (env):
+#   VARIANTS         space-separated list of variant ids to run. Default "V0 V1 V2 V3".
+#                    Supported ids: V0 (baseline recheck), V1, V2, V3, V4, V4b.
+#                    V4  = V1 + L24:{7,9,10}  (rank-variance principled, spec m1b2_v4_spec_2026-06-25.md)
+#                    V4b = V4 + L24:{0}       (Pareto sibling, adds borderline h0 at 53.5% bot-4 freq)
+#   SCENE_FILTER     name of train_test_split yaml in navsim's config.
+#                    Default "navtest_local_filtered" (= full 11576 token B0 set).
+#                    For Phase E2 5-token gate use "navtest_smoke5".
+#   GPU              device index (default 0). Single-GPU only — we serialize
+#                    to keep variant tagging clean.
+#   TIMEOUT          per-variant timeout in seconds (default 18000 = 5h).
+#                    For smoke set TIMEOUT=900.
+#   TAG_PREFIX       experiment_name prefix (default m1b_freelunch).
+#   DRY_RUN          if "1", prints commands without executing.
+#   RESULTS_ROOT     where to drop results/raw/M1b_freelunch_*/ (default
+#                    ${PROJECT_ROOT}/results/raw).
+#
+# Outputs per variant:
+#   ${RESULTS_ROOT}/M1b_freelunch_${variant}_${TS}/
+#     - merged.csv           (full token-level pdm_score table)
+#     - aggregate.json       (pdms/epdms/sub-metrics)
+#     - manifest.json        (full provenance per spec §5.1)
+#     - shard0.log           (dispatcher log for the single shard)
+#
+# Non-strict: a failing variant does NOT halt the script — its manifest is
+# written with passes_acceptance=false and the loop continues.
+# ============================================================================
+set -uo pipefail
+
+PROJECT_ROOT="/apdcephfs/private_shayladeng/tokenrl_autoVLA"
+AUTOVLA_ROOT="${PROJECT_ROOT}/code/third_party/AutoVLA"
+NAVSIM_ROOT="${AUTOVLA_ROOT}/navsim"
+
+PY="${PY:-/apdcephfs/private_shayladeng/miniconda3/envs/autovla/bin/python}"
+[[ -x "${PY}" ]] || { echo "[m1b_sweep] FATAL: no python at ${PY}" >&2; exit 2; }
+
+# shellcheck disable=SC1091
+source "${PROJECT_ROOT}/scripts/setup_navsim_env_vars.sh"
+
+# Make the wrapped agent + head_mask_patch importable inside hydra.
+export PYTHONPATH="${PROJECT_ROOT}/code:${NAVSIM_ROOT}:${AUTOVLA_ROOT}:${PYTHONPATH:-}"
+
+# ---- knobs ----
+VARIANTS="${VARIANTS:-V0 V1 V2 V3}"
+SCENE_FILTER="${SCENE_FILTER:-navtest_local_filtered}"
+GPU="${GPU:-0}"
+TIMEOUT="${TIMEOUT:-18000}"
+TAG_PREFIX="${TAG_PREFIX:-m1b_freelunch}"
+DRY_RUN="${DRY_RUN:-0}"
+RESULTS_ROOT="${RESULTS_ROOT:-${PROJECT_ROOT}/results/raw}"
+LOG_DIR="${PROJECT_ROOT}/logs"
+mkdir -p "${RESULTS_ROOT}" "${LOG_DIR}"
+
+# ---- assets ----
+CKPT="${PROJECT_ROOT}/models/AutoVLA/AutoVLA_PDMS_89.ckpt"
+QWEN_BASE="${PROJECT_ROOT}/models/Qwen2.5-VL-3B-Instruct"
+JSON_DIR="${JSON_DIR:-${PROJECT_ROOT}/data/navtest_nocot}"
+METRIC_CACHE="${METRIC_CACHE:-${PROJECT_ROOT}/data/navtest_metric_cache}"
+TRAIN_YAML="${AUTOVLA_ROOT}/config/training/qwen2.5-vl-3B-navtest-grpo-nocot.yaml"
+SENSOR_DATA="${PROJECT_ROOT}/data/navsim_v2_local"
+
+for f in "${CKPT}" "${QWEN_BASE}" "${JSON_DIR}" "${METRIC_CACHE}" "${TRAIN_YAML}"; do
+  [[ -e "${f}" ]] || { echo "[m1b_sweep] FATAL: asset not found: ${f}" >&2; exit 3; }
+done
+
+# ---- variant -> head_mask hydra-string (hydra dict syntax: {12: [13], 27: [0,8,9]}) ----
+# Note: hydra parses dict overrides with curly braces; bash-quote the whole RHS.
+variant_head_mask() {
+  case "$1" in
+    V0) echo 'null' ;;
+    V1) echo '{12: [13]}' ;;
+    V2) echo '{12: [13], 27: [0, 8, 9]}' ;;
+    V3) echo '{12: [13], 24: [0, 1, 2, 6, 7, 8, 9, 10, 12, 14, 15], 27: [0, 8, 9]}' ;;
+    V4)  echo '{12: [13], 24: [7, 9, 10]}' ;;
+    V4b) echo '{12: [13], 24: [0, 7, 9, 10]}' ;;
+    # ---- M1.b₂ Phase 3 static baselines (single-layer L12 K=4) ----
+    # Sc4    = train freq top-4   of L12 (always-on heads): [0, 6, 13, 14]
+    # Sc4n13 = train freq top-4 excluding h13 (always-on)  : [0, 2, 6, 14]
+    Sc4)    echo '{12: [0, 6, 13, 14]}' ;;
+    Sc4n13) echo '{12: [0, 2, 6, 14]}' ;;
+    # ---- M1.b₂ Phase 3 Pivot-1: scan K = 6, 8, 10 on L12 (find hurt threshold) ----
+    # Sorted by L12 bot-K freq desc:
+    #   h13(1.00) h14(.93) h6(.78) h0(.53) | h2(.38) h4(.36) | h10(.02) h1(.005) | h3(.003) h5(0)
+    # Sc6  = top-6:  [0, 2, 4, 6, 13, 14]                    (still mostly safe)
+    # Sc8  = top-8:  [0, 1, 2, 4, 6, 10, 13, 14]             (h1+h10 are rare-bot, risk)
+    # Sc10 = top-10: [0, 1, 2, 3, 4, 5, 6, 10, 13, 14]       (h3+h5 essentially never-bot, expected hurt)
+    Sc6)    echo '{12: [0, 2, 4, 6, 13, 14]}' ;;
+    Sc8)    echo '{12: [0, 1, 2, 4, 6, 10, 13, 14]}' ;;
+    Sc10)   echo '{12: [0, 1, 2, 3, 4, 5, 6, 10, 13, 14]}' ;;
+    # ---- M1.b₂ cross-layer free-lunch (2026-06-30): const-K bot-4 on UNMEASURED
+    #      layers, to test whether static head redundancy is a cross-layer
+    #      phenomenon or unique to L12. Head sets = top-4 bot-K freq per layer
+    #      from exp/m1b2_phase2_v0/botK_freq_alllayers.json (K=4 capture):
+    #        L8  bot-4 freq: h11/12/14/15 all =1.00 (clean cliff; h>4 ~0)
+    #        L16 bot-4 freq: h14=.996 h10=.948 h13=.898 h1=1.00 (clean cliff)
+    #        L20 bot-4 freq: h8/11/12/14 all =1.00 (clean cliff; h>4 ~0)
+    L8K4)   echo '{8: [11, 12, 14, 15]}' ;;
+    L16K4)  echo '{16: [1, 10, 13, 14]}' ;;
+    L20K4)  echo '{20: [8, 11, 12, 14]}' ;;
+    # ---- 2026-07-01 path-A clean bot-4 backfill for the layer×prunability
+    #      landscape (§6.8). Same rule = const_topK_head_idxs from
+    #      botK_freq_alllayers.json. L24 bot-4 freq: h0=1.0 h7=.989 h9=.937 h10=.535.
+    #      (L24K4 = V4's L24:{7,9,10} + borderline h0; isolates L24 without L12:h13.)
+    L24K4)  echo '{24: [0, 7, 9, 10]}' ;;
+    # L27 bot-4 recomputed 2026-07-01 from 24GB dump L27 slice (_oneoff_botK_freq_L27.py):
+    #   h0=h8=h9=h15=1.00 (clean cliff; = V2's L27:{0,8,9} + h15, isolated w/o L12:h13).
+    L27K4)  echo '{27: [0, 8, 9, 15]}' ;;
+    # early-layer clean bot-4 to fill the LEFT end of the landscape curve
+    # (from botK_freq_alllayers.json const_topK):
+    L0K4)   echo '{0: [1, 5, 11, 12]}' ;;
+    L4K4)   echo '{4: [0, 1, 4, 15]}' ;;
+    # ---- cross-layer over-prune (K=6) to map per-layer "cliff wall" in real PDMS.
+    #      bot-6 sets from botK_freq_alllayers.json (heads 5,6 are near-zero freq
+    #      => expected to start hurting, locating the wall):
+    L8K6)   echo '{8: [2, 9, 11, 12, 14, 15]}' ;;
+    L16K6)  echo '{16: [1, 8, 10, 11, 13, 14]}' ;;
+    L20K6)  echo '{20: [0, 1, 8, 11, 12, 14]}' ;;
+    # ---- CUMULATIVE free-lunch (headline): delete bot-4 at multiple redundant
+    #      layers simultaneously. Lcomb3 = 3 new layers (12 heads); Lcomb4 adds
+    #      L12 (=Sc4 [0,6,13,14], already-known free) for 16 heads total.
+    Lcomb3K4) echo '{8: [11, 12, 14, 15], 16: [1, 10, 13, 14], 20: [8, 11, 12, 14]}' ;;
+    Lcomb4K4) echo '{8: [11, 12, 14, 15], 12: [0, 6, 13, 14], 16: [1, 10, 13, 14], 20: [8, 11, 12, 14]}' ;;
+    L26K4)  echo '{26: [0, 8, 11, 13]}' ;;
+    L25K4)  echo '{25: [7, 10, 12, 13]}' ;;
+    L22K4)  echo '{22: [1, 3, 5, 8]}' ;;
+    *)  echo ''; return 1 ;;
+  esac
+}
+
+echo "[m1b_sweep] ============================================================"
+echo "[m1b_sweep] M1.b Level-0 free-lunch sweep"
+echo "[m1b_sweep] VARIANTS       = ${VARIANTS}"
+echo "[m1b_sweep] SCENE_FILTER   = ${SCENE_FILTER}"
+echo "[m1b_sweep] GPU            = ${GPU}"
+echo "[m1b_sweep] TIMEOUT (each) = ${TIMEOUT}s"
+echo "[m1b_sweep] DRY_RUN        = ${DRY_RUN}"
+echo "[m1b_sweep] git HEAD       = $(cd ${PROJECT_ROOT} && git rev-parse --short HEAD)"
+echo "[m1b_sweep] host           = $(hostname)"
+echo "[m1b_sweep] ============================================================"
+
+GIT_HEAD="$(cd ${PROJECT_ROOT} && git rev-parse HEAD)"
+HOST="$(hostname)"
+
+for VARIANT in ${VARIANTS}; do
+  TS=$(date +%Y%m%d_%H%M%S)
+  # 2026-06-23 race-fix: include GPU id in EXP_NAME / VARIANT_DIR so concurrent
+  # workers in run_m1b_phaseF_2gpu.sh cannot collide on the same TS-second.
+  # dispatcher is_done() globs M1b_freelunch_${V}_*  -> still matches.
+  # aggregation script reads manifest.scene_filter   -> dir name irrelevant.
+  EXP_NAME="${TAG_PREFIX}_${VARIANT}_g${GPU}_${TS}"
+  HEAD_MASK="$(variant_head_mask "${VARIANT}")"
+  if [[ -z "${HEAD_MASK}" ]]; then
+    echo "[m1b_sweep] SKIP: unknown variant '${VARIANT}'" >&2
+    continue
+  fi
+
+  VARIANT_DIR="${RESULTS_ROOT}/M1b_freelunch_${VARIANT}_g${GPU}_${TS}"
+  mkdir -p "${VARIANT_DIR}"
+  SHARD_LOG="${VARIANT_DIR}/shard0.log"
+
+  echo ""
+  echo "[m1b_sweep] >>> ${VARIANT}  head_mask_layers=${HEAD_MASK}"
+  echo "[m1b_sweep]     exp=${EXP_NAME}  out=${VARIANT_DIR}"
+  echo "[m1b_sweep]     ts=${TS}"
+
+  # Pre-run git tag (best-effort; non-fatal if git unavailable)
+  (cd "${PROJECT_ROOT}" && git tag "m1b_${VARIANT}_pre_${TS}" 2>/dev/null) || true
+
+  TS_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  T_START_EPOCH=$(date +%s)
+
+  # Build hydra args. We override agent._target_ to the wrapped class, disable
+  # the M1.a capture (head_mask only — capture is independent and would slow us),
+  # and pass the variant's head_mask_layers.
+  HYDRA_ARGS=(
+    "experiment_name=${EXP_NAME}"
+    "train_test_split=${SCENE_FILTER}"
+    "metric_cache_path=${METRIC_CACHE}"
+    "+json_data_path=${JSON_DIR}"
+    "agent._target_=rldrive.agents.autovla_with_attention.AutoVLAWithAttentionAgent"
+    "+agent.config_path=${TRAIN_YAML}"
+    "+agent.checkpoint_path=${CKPT}"
+    "+agent.sensor_data_path=${SENSOR_DATA}"
+    "+agent.codebook_cache_path=${AUTOVLA_ROOT}/codebook_cache/agent_vocab.pkl"
+    "+agent.lora_conf.use_lora=false"
+    "+agent.attention_enabled=false"
+    "+agent.head_mask_verbose=true"
+    "worker=single_machine_thread_pool"
+    "worker.max_workers=1"
+  )
+  if [[ "${HEAD_MASK}" != "null" ]]; then
+    HYDRA_ARGS+=("+agent.head_mask_layers=${HEAD_MASK}")
+  fi
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[m1b_sweep DRY] cd ${NAVSIM_ROOT} && CUDA_VISIBLE_DEVICES=${GPU} \\"
+    echo "[m1b_sweep DRY]   ${PY} ${NAVSIM_ROOT}/navsim/planning/script/run_pdm_score_cot.py \\"
+    for a in "${HYDRA_ARGS[@]}"; do echo "[m1b_sweep DRY]     ${a}"; done
+    continue
+  fi
+
+  RC=0
+  (
+    cd "${NAVSIM_ROOT}" || exit 99
+    export CUDA_VISIBLE_DEVICES="${GPU}"
+    exec timeout --signal=TERM --kill-after=30s "${TIMEOUT}s" \
+      "${PY}" "${NAVSIM_ROOT}/navsim/planning/script/run_pdm_score_cot.py" \
+      "${HYDRA_ARGS[@]}"
+  ) > "${SHARD_LOG}" 2>&1 || RC=$?
+
+  T_END_EPOCH=$(date +%s)
+  TS_END_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  WALL_S=$(( T_END_EPOCH - T_START_EPOCH ))
+
+  echo "[m1b_sweep]     rc=${RC}  wall=${WALL_S}s"
+
+  # ---- collect outputs ----
+  EXP_DIR_NAVSIM="${NAVSIM_EXP_ROOT}/${EXP_NAME}"
+  CSVS=$(find "${EXP_DIR_NAVSIM}" -name "*.csv" 2>/dev/null | head -20)
+  N_CSV=$(echo "${CSVS}" | grep -c '.' 2>/dev/null || true)
+
+  PDMS="null"; EPDMS="null"; N_VALID="null"; N_TOTAL="null"; PASSES="false"; FAIL_REASON="null"
+  if [[ ${N_CSV} -gt 0 ]]; then
+    # Merge per-shard csv (typically only one csv for single-GPU run)
+    "${PY}" - <<PYEOF
+import sys, json
+from pathlib import Path
+import pandas as pd
+
+exp_dir = Path("${EXP_DIR_NAVSIM}")
+out_dir = Path("${VARIANT_DIR}")
+out_dir.mkdir(parents=True, exist_ok=True)
+
+csvs = sorted(exp_dir.rglob("*.csv"))
+if not csvs:
+    print("[merge] no csv", flush=True); sys.exit(1)
+
+frames = [pd.read_csv(c) for c in csvs]
+m = pd.concat(frames, ignore_index=True)
+# drop navsim's per-shard 'average' aggregate row
+m = m[m["token"] != "average"].copy()
+m = m.drop_duplicates(subset="token")
+m.to_csv(out_dir / "merged.csv", index=False)
+
+valid = m.loc[m["valid"]]
+agg = {
+    "pdms":  float(valid["score"].mean()) if len(valid) else None,
+    "n_valid": int(len(valid)),
+    "n_total": int(len(m)),
+    "sub_metrics": {},
+}
+for col in (
+    "no_at_fault_collisions","drivable_area_compliance","ego_progress",
+    "time_to_collision_within_bound","comfort","driving_direction_compliance",
+):
+    if col in m.columns:
+        agg["sub_metrics"][col] = float(valid[col].mean()) if len(valid) else None
+
+(out_dir / "aggregate.json").write_text(json.dumps(agg, indent=2))
+print(f"[merge] pdms={agg['pdms']}  n_valid={agg['n_valid']}/{agg['n_total']}", flush=True)
+PYEOF
+
+    if [[ -s "${VARIANT_DIR}/aggregate.json" ]]; then
+      PDMS=$("${PY}" -c "import json; print(json.load(open('${VARIANT_DIR}/aggregate.json'))['pdms'])" 2>/dev/null || echo "null")
+      N_VALID=$("${PY}" -c "import json; print(json.load(open('${VARIANT_DIR}/aggregate.json'))['n_valid'])" 2>/dev/null || echo "null")
+      N_TOTAL=$("${PY}" -c "import json; print(json.load(open('${VARIANT_DIR}/aggregate.json'))['n_total'])" 2>/dev/null || echo "null")
+    fi
+  else
+    FAIL_REASON='"no csv produced — dispatcher likely failed"'
+  fi
+  if [[ ${RC} -ne 0 ]]; then
+    FAIL_REASON='"dispatcher rc='${RC}'"'
+  fi
+
+  # ---- write manifest.json ----
+  cat > "${VARIANT_DIR}/manifest.json" <<EOM
+{
+  "spec_doc": "docs/specs/m1b_freelunch_spec.md",
+  "spec_version": "v1",
+  "variant": "${VARIANT}",
+  "head_mask_layers_str": "${HEAD_MASK}",
+  "git_commit": "${GIT_HEAD}",
+  "ts_start_utc": "${TS_START_UTC}",
+  "ts_end_utc":   "${TS_END_UTC}",
+  "wall_seconds": ${WALL_S},
+  "gpu":          ${GPU},
+  "host":         "${HOST}",
+  "scene_filter": "${SCENE_FILTER}",
+  "exp_name":     "${EXP_NAME}",
+  "exp_dir":      "${EXP_DIR_NAVSIM}",
+  "rc":           ${RC},
+  "n_valid":      ${N_VALID},
+  "n_total":      ${N_TOTAL},
+  "pdms":         ${PDMS},
+  "passes_acceptance_naive": ${PASSES},
+  "failure_reason": ${FAIL_REASON},
+  "shard_log":    "${SHARD_LOG}"
+}
+EOM
+
+  echo "[m1b_sweep]     manifest: ${VARIANT_DIR}/manifest.json"
+  echo "[m1b_sweep]     PDMS=${PDMS}  n_valid=${N_VALID}/${N_TOTAL}"
+
+  # Post-run git tag
+  (cd "${PROJECT_ROOT}" && git tag "m1b_${VARIANT}_post_${TS}" 2>/dev/null) || true
+done
+
+echo ""
+echo "[m1b_sweep] DONE. results under ${RESULTS_ROOT}/M1b_freelunch_*"
+echo "[m1b_sweep] summary:"
+for d in $(ls -d "${RESULTS_ROOT}"/M1b_freelunch_* 2>/dev/null | tail -10); do
+  if [[ -f "${d}/manifest.json" ]]; then
+    "${PY}" -c "
+import json
+m = json.load(open('${d}/manifest.json'))
+print(f'  {m[\"variant\"]}  pdms={m[\"pdms\"]}  rc={m[\"rc\"]}  wall={m[\"wall_seconds\"]}s  fail={m[\"failure_reason\"]}')
+"
+  fi
+done

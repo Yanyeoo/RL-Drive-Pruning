@@ -122,18 +122,17 @@ transformers_cache/
 # deprecated early-draft milestones (kept on disk for history, not pushed)
 docs/plan/milestones.md
 
-# internal handoff doc, never push
-docs/_internal/
+# internal analysis docs — now tracked
+# docs/_internal/
 
 # ---------- third-party / vendored repos ----------
-# AutoVLA upstream clone (ucla-mobility/AutoVLA). Local edits are tracked
-# via patch files under docs/_internal/patches/ (gitignored too).
-# DO NOT add this directory to git — it contains a separate repo + 16GB ckpt.
-code/third_party/
+# Track our patches/configs in third_party, but exclude .git and large binaries
+code/third_party/**/.git/
+code/third_party/**/codebook_cache/*.pkl
+code/third_party/ImpromptuVLA/
 
-# ---------- launch scripts (contain absolute /apdcephfs paths, not for public push) ----------
-# Internal copies live in docs/_internal/scripts_internal/
-scripts/
+# ---------- scripts: track all ----------
+# (absolute paths are fine, this is a private research repo)
 
 # ---------- local artifacts (do not commit) ----------
 backups/

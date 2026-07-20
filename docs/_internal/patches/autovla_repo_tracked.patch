@@ -1,0 +1,62 @@
+diff --git a/models/autovla.py b/models/autovla.py
+index 9815970..25f1a2a 100644
+--- a/models/autovla.py
++++ b/models/autovla.py
+@@ -85,7 +85,9 @@ class GRPOAutoVLA(pl.LightningModule):
+             # Normalize the rewards to compute the advantage.
+             groupped_rewards = self.all_gather(reward)
+             print(groupped_rewards)
+-            advantage = (reward - groupped_rewards.mean()) / (groupped_rewards.std() + 1e-4)
++            # Use biased std (population) to avoid NaN when N=1 (single-card smoke,
++            # batch_size=1, num_generations=1). Unbiased std on n=1 returns NaN.
++            advantage = (reward - groupped_rewards.mean()) / (groupped_rewards.std(unbiased=False) + 1e-4)
+ 
+         # Compute the per-token log probabilities.
+         per_token_logps = self.get_per_token_logps(
+@@ -217,7 +219,10 @@ class GRPOAutoVLA(pl.LightningModule):
+         torch.manual_seed(int(str(device).split(':')[-1]))
+ 
+         # Generate completion
+-        with torch.no_grad():
++        # Force-disable autocast around generate: prevents Lightning / parent
++        # contexts from silently casting params to bf16/fp16 during sampling.
++        # See docs/journal/2026-06-15_ma2_3_grpo_smoke_debug.md for context.
++        with torch.no_grad(), torch.amp.autocast(device_type='cuda', enabled=False):
+             prompt_completion_ids = model.vlm.generate(
+                 **model_inputs,
+                 do_sample=True,
+@@ -477,10 +482,32 @@ class AutoVLA(torch.nn.Module):
+         self.device = device
+ 
+         model_path = config['model']['pretrained_model_path']
++        # dtype is configurable via training.dtype (fp32|bf16|fp16). default fp32
++        # because bf16/fp16 cuBLAS GEMM SIGFPEs on Hopper (sm_90) H20 with
++        # torch 2.4 + cu121. fp32 + TF32 still gives ~93 tok/s on this stack.
++        _dtype_str = config.get('training', {}).get('dtype', 'fp32')
++        _dtype_map = {'fp32': torch.float32, 'bf16': torch.bfloat16, 'fp16': torch.float16}
++        _torch_dtype = _dtype_map.get(_dtype_str, torch.float32)
++        # attn_implementation is configurable via training.attn_impl. default 'eager'
++        # because the default 'sdpa' path triggers a cuBLAS fp32 GEMM SIGFPE inside
++        # generate() on real 3-video batches (video_grid_thw=(3,3)) on H20 sm_90 +
++        # torch 2.4 + cu121. 'eager' bypasses the fused SDPA kernel.
++        # See docs/journal/2026-06-15_ma2_3_grpo_smoke_debug.md §2.4 (E1).
++        _attn_impl = config.get('training', {}).get('attn_impl', 'eager')
++
++        # Optionally disable TF32 fp32 GEMM on cuBLAS. The TF32 GEMM kernel on
++        # H20 sm_90 + torch 2.4 + cu121 SIGFPEs on the real 3-video batch shape;
++        # disabling it forces the strict fp32 IEEE GEMM kernel.
++        # See docs/journal/2026-06-15_ma2_3_grpo_smoke_debug.md §2.4 (E3).
++        if config.get('training', {}).get('disable_tf32', True):
++            torch.backends.cuda.matmul.allow_tf32 = False
++            torch.backends.cudnn.allow_tf32 = False
++
+         self.vlm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+             model_path,
+-            torch_dtype=torch.bfloat16,
+-            device_map=device
++            torch_dtype=_torch_dtype,
++            device_map=device,
++            attn_implementation=_attn_impl,
+         )
+         self.processor = AutoProcessor.from_pretrained(model_path)
+         self.action_tokenizer = ActionTokenizer(self.processor.tokenizer, 

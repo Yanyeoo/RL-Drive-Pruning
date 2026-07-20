@@ -1,0 +1,18 @@
+# 21h window queue — gpu|exp|shard|keep_ratio|selector|tau|scorer_ckpt
+# P1 τ-cut full curve (sh0 already done for kr050/kr070 from quick test)
+0|TC_mse_tau_kr050_sh1|1|0.5|scorer_taucut|-0.1487|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+0|TC_mse_tau_kr050_sh2|2|0.5|scorer_taucut|-0.1487|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+1|TC_mse_tau_kr050_sh3|3|0.5|scorer_taucut|-0.1487|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+1|TC_mse_tau_kr070_sh1|1|0.5|scorer_taucut|-0.1840|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+2|TC_mse_tau_kr070_sh2|2|0.5|scorer_taucut|-0.1840|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+2|TC_mse_tau_kr070_sh3|3|0.5|scorer_taucut|-0.1840|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+# P2 MSE scorer ablation (MSE ckpt, fixed keep-ratio)
+3|MT_scorer_mse_r05_sh0|0|0.5|scorer|none|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+3|MT_scorer_mse_r05_sh1|1|0.5|scorer|none|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+4|MT_scorer_mse_r05_sh2|2|0.5|scorer|none|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+4|MT_scorer_mse_r05_sh3|3|0.5|scorer|none|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+5|MT_scorer_mse_r075_sh0|0|0.75|scorer|none|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+5|MT_scorer_mse_r075_sh1|1|0.75|scorer|none|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+6|MT_scorer_mse_r075_sh2|2|0.75|scorer|none|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+6|MT_scorer_mse_r075_sh3|3|0.75|scorer|none|/apdcephfs/private_shayladeng/tokenrl_autoVLA/ckpt/s3_token_scorer_mse
+# GPU7 reserved for P0 (SparseVLM/PruMerge) — appended after implementation

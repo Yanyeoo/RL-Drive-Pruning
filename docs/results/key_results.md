@@ -834,3 +834,38 @@ Additional offline analysis (Spearman rank correlation with L12 attention on 100
 - FastV r=0.5 results (ETA tonight)
 - MSE scorer PDMS eval (supplementary, if time permits)
 - FastV r=0.75 (lower priority, partial OK)
+
+---
+
+## 13. AAAI-2027 main-table audit (agent, 2026-07-18 21h window)
+
+> Source of truth for `paper/aaai2027/main.tex` §table (L254-287) + Pareto (L298-303).
+> PDMS = mean of `score` over 4 merged shards (no `average` row exists; `token`=scene id).
+> Base = no-prune = attn_L12 r=1.0 = 0.8988.
+
+### 13.1 Stable (4-shard, from `_aggregate.md`)
+| method | r | PDMS | Δ vs 0.8988 | N |
+|---|---|---:|---:|---|
+| no-prune | 1.00 | 0.8988 | — | 11575 |
+| SFT Scorer | 0.75 | 0.8983 | −0.05 | 11573 |
+| SFT Scorer | 0.50 | 0.8920 | −0.69 | 11572 |
+| SFT Scorer | 0.25 | 0.8508 | −4.80 | 11574 |
+| attn_L12 | 0.50 | 0.8901 | −0.87 | 11574 |
+| random | 0.50 | 0.8635 | −3.52 | 11576 |
+| τ-cut kr060 (MSE) | 0.60† | 0.8940 | −0.48 | full |
+
+iso r=0.5 (N=11570): scorer 0.891978 / attn_L12 0.890202 / random 0.863624 / r1.0 0.898848.
+scorer−attn_L12 = +0.178pt ; scorer−random = +2.835pt ; scorer−r1.0 = −0.687pt.
+
+### 13.2 Pending aggregation (csv landed 4/4, not yet in `_aggregate.md`)
+- FastV L2 r=0.50 / r=0.75 → `MT_fastv_l2_r0{5,75}_sh0-3` (rerun `s3_aggregate_maintable.py`)
+- Variant B safe r=0.50 → `MT_varBsafe_scorer_r05_sh0-3` (HANDOFF notes ≈0.8725)
+
+### 13.3 Pending P1/P2 (csv not landed)
+- P1: τ-cut kr050 sh1-3, kr070 sh1-3 (`TC_mse_tau_kr0{50,70}_sh{1..3}.csv`) + GPU7: kr040 sh1-3
+- P2: MSE scorer r=0.50/0.75 × 4 sh (`MT_mse_scorer_r0{5,75}_sh*.csv`)
+- RL full-navtest r=0.50 (only Q1500-subset exists: rlsh3best=0.8891) → blocks L273/L92/+Z
+
+### 13.4 Known conflict (do NOT rewrite RL主线 — §2b decision)
+RL best 0.889 < SFT 0.8920 (full) / 0.8953 (subset). main.tex L273/L92/L53/L311
+assume RL>SFT (+Z); 回填时 +Z 将为负。Keep RL主线 per user 18:53 ruling.

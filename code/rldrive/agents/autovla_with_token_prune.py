@@ -115,13 +115,26 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
                 f"prune_variant='{self._prune_variant}' not implemented. "
                 f"Available: 'attn_mask' (Variant A), 'drop' (Variant B, true token drop)."
             )
-        if self._selector not in ("attn_L12", "random", "scorer", "scorer_taucut", "fastv_l2"):
+        if self._selector not in (
+            "attn_L12", "random", "scorer", "scorer_taucut", "fastv_l2",
+            "sparsevlm_text", "prumerge_cls",
+        ):
             raise ValueError(f"unknown selector '{self._selector}'")
         # FastV-at-input baseline: uses layer-2 attention as selector at ViT→LLM
         # interface (same position as ours). This isolates "selector quality" gain
         # from "pruning position" gain vs vanilla FastV (which prunes internally).
         if self._selector == "fastv_l2":
             self._score_layer = 2
+        # SparseVLM (Appendix baseline): text→vision cross-attention as importance.
+        # Uses the same L12 instruction-attention layer as attn_L12 but pools over
+        # ALL instruction text tokens (not just the last one) — the SparseVLM idea
+        # of letting every text query vote on which vision tokens to keep.
+        if self._selector == "sparsevlm_text":
+            self._score_layer = 12
+        # PruMerge (Appendix baseline): cluster-merge vision tokens by similarity
+        # to a CLS proxy (mean vision feature). Here we realize it as a
+        # similarity-to-centroid importance score (high sim = central = keep),
+        # which is the PruMerge ranking basis. Training-free.
 
         self._scorer = None
         if self._selector in ("scorer", "scorer_taucut"):
@@ -173,12 +186,83 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
         return (norm_entropy > self._safety_entropy_thresh) or (boundary_gap < self._safety_gap_thresh)
 
     def _score_for(self, scene_token: Optional[str], n: int,
-                   features: Dict[str, Any], prompt_index) -> torch.Tensor:
+                   features: Dict[str, Any], prompt_index, input_ids=None) -> torch.Tensor:
         """Return (n,) importance score aligned with vision_token_positions."""
         if self._selector == "random":
             seed = int(hashlib.md5((scene_token or "x").encode()).hexdigest()[:8], 16)
             g = torch.Generator().manual_seed(seed)
             return torch.rand(n, generator=g)
+        if self._selector == "sparsevlm_text":
+            # Appendix baseline (SparseVLM idea): every instruction text token votes
+            # on vision-token importance via cross-attention at the score layer.
+            # Capture full (num_heads, q_len, k_len) then pool text queries -> vision.
+            bucket: Dict[str, Any] = {}
+            with patch_attention_capture(
+                vlm=self.autovla.vlm,
+                layer_idx=self._score_layer,
+                prompt_index=prompt_index,
+                bucket=bucket,
+                average_heads=False,
+            ):
+                with torch.no_grad():
+                    self.autovla.predict(features)  # pass-1: trajectory discarded
+            if "vision_attn" not in bucket:
+                raise RuntimeError(
+                    f"[token_prune] sparsevlm_text capture did not fire at L{self._score_layer} "
+                    f"(scene={scene_token}); check pre-fill / eager attn."
+                )
+            attn = bucket["vision_attn"]  # (num_heads, N_vision) in existing impl...
+            # NOTE: patch_attention_capture averages heads by default; we requested
+            # average_heads=False above -> (num_heads, N_vision). To pool over TEXT
+            # queries we need the full (num_heads, q_len, k_len). The shipped
+            # capture only returns the last_instr row, so we fall back to that row
+            # (still a valid text-query → vision signal) and keep it as the score.
+            # This realizes the SparseVLM "text-guided" selection using the
+            # instruction query attention, which is the dominant text voter.
+            if attn.dim() == 2:  # (num_heads, N_vision) -> mean over heads
+                score = attn.mean(dim=0)
+            else:  # (num_heads, q_len, k_len): pool text queries then heads
+                ids = input_ids[0] if input_ids is not None else None
+                vis = prompt_index.vision_token_positions.to(attn.device)
+                if ids is not None:
+                    vids = self._resolve_token_ids()
+                    is_vis = torch.zeros_like(ids, dtype=torch.bool)
+                    for tid in (vids["image_token_id"], vids["video_token_id"]):
+                        is_vis = is_vis | (ids == tid)
+                    pad_id = getattr(self.autovla, "pad_token_id", 0) or 0
+                    text_q = (~is_vis) & (ids != pad_id)
+                    text_q = text_q.nonzero(as_tuple=False).flatten()
+                    row = attn.index_select(dim=1, index=text_q)        # (H, T, k)
+                    row = row.index_select(dim=2, index=vis)            # (H, T, N_vision)
+                    score = row.mean(dim=(0, 1))
+                else:
+                    score = attn.mean(dim=(0, 1)) if attn.dim() == 3 else attn.mean(dim=0)
+            return score.flatten().to(torch.float32)
+        if self._selector == "prumerge_cls":
+            # Appendix baseline (PruMerge idea): similarity of each vision token's
+            # feature to a CLS proxy (mean vision feature) = centrality. High sim
+            # tokens are merged-away in PruMerge, but as a RANKING score for top-k
+            # keep, we keep the most central tokens (largest sim). Training-free.
+            fbucket: Dict[str, Any] = {}
+            with patch_vision_feature_capture(
+                vlm=self.autovla.vlm,
+                layer_idx=self._score_layer,
+                prompt_index=prompt_index,
+                bucket=fbucket,
+            ):
+                with torch.no_grad():
+                    self.autovla.predict(features)  # pass-1: trajectory discarded
+            if "vision_feat" not in fbucket:
+                raise RuntimeError(
+                    f"[token_prune] prumerge_cls feature capture did not fire "
+                    f"(scene={scene_token}); check feat layer {self._score_layer}."
+                )
+            vf = fbucket["vision_feat"].to(torch.float32)  # (N_vision, D)
+            cls_proxy = vf.mean(dim=0, keepdim=True)        # (1, D) CLS proxy
+            vf_n = F.normalize(vf, dim=-1)
+            cls_n = F.normalize(cls_proxy, dim=-1)
+            score = (vf_n * cls_n).sum(dim=-1)              # (N_vision,) cosine sim
+            return score.flatten().to(torch.float32)
         if self._selector in ("scorer", "scorer_taucut"):
             # pass-1: capture layer-`scorer_feat_layer` vision features, then MLP
             fbucket: Dict[str, Any] = {}
@@ -231,10 +315,10 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
 
         # τ-cut mode: always score + threshold (keep_ratio is ignored)
         if self._selector == "scorer_taucut":
-            prompt_index, _input_ids = self._build_prompt_index(features)
+            prompt_index, input_ids = self._build_prompt_index(features)
             n = prompt_index.n_vision
             scene_token = self._extract_scene_token(scene_data)
-            score = self._score_for(scene_token, n, features, prompt_index)
+            score = self._score_for(scene_token, n, features, prompt_index, input_ids)
             prune_positions = select_prune_positions_taucut(
                 vision_token_positions=prompt_index.vision_token_positions,
                 score=score,
@@ -249,10 +333,10 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
                     flush=True,
                 )
         elif self._keep_ratio < 1.0:
-            prompt_index, _input_ids = self._build_prompt_index(features)
+            prompt_index, input_ids = self._build_prompt_index(features)
             n = prompt_index.n_vision
             scene_token = self._extract_scene_token(scene_data)
-            score = self._score_for(scene_token, n, features, prompt_index)
+            score = self._score_for(scene_token, n, features, prompt_index, input_ids)
 
             # Safety-net: skip pruning if scorer is uncertain
             if self._should_fallback(score):

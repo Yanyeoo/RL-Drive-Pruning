@@ -85,7 +85,7 @@ def _set_gpu(gpu: int) -> None:
 
 
 def _validate_inputs(args: argparse.Namespace) -> None:
-    if not Path(args.checkpoint).exists():
+    if args.checkpoint and not Path(args.checkpoint).exists():
         raise FileNotFoundError(f"checkpoint not found: {args.checkpoint}")
     if not Path(args.config).exists():
         raise FileNotFoundError(f"config not found: {args.config}")

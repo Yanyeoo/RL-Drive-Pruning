@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import ExitStack
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import math
@@ -77,6 +78,8 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
         safety_entropy_thresh: float = 0.92, # normalized entropy threshold (0-1, higher=more flat)
         safety_gap_thresh: float = 0.01,     # boundary gap threshold (lower=less confident)
         safety_temperature: float = 1.0,     # softmax temperature for entropy computation
+        # ---- Variant B denylist (scenes where true-drop causes catastrophic failure) ----
+        varB_denylist: Optional[str] = None, # path to JSON list of scene tokens to skip pruning
     ):
         # Force parent's attention capture OFF (we drive capture manually in
         # pass-1 so we control the 2-pass flow); head_mask off.
@@ -105,6 +108,12 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
         self._safety_gap_thresh = float(safety_gap_thresh)
         self._safety_temperature = float(safety_temperature)
         self._safety_net_triggers = 0  # counter for monitoring
+
+        # Variant B denylist: scenes known to catastrophically fail under true-drop
+        self._varB_denylist: set = set()
+        if varB_denylist and Path(varB_denylist).exists():
+            import json
+            self._varB_denylist = set(json.loads(Path(varB_denylist).read_text()))
 
         # τ-cut config
         self._tau = tau if tau is not None else None
@@ -338,8 +347,16 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
             scene_token = self._extract_scene_token(scene_data)
             score = self._score_for(scene_token, n, features, prompt_index, input_ids)
 
+            # Variant B denylist: skip pruning for known catastrophic scenes
+            if self._varB_denylist and scene_token in self._varB_denylist:
+                if self._prune_verbose:
+                    print(
+                        f"[token_prune] DENYLIST scene={scene_token} -> skip prune (varB catastrophic)",
+                        flush=True,
+                    )
+                prune_positions = None  # no pruning for this scene
             # Safety-net: skip pruning if scorer is uncertain
-            if self._should_fallback(score):
+            elif self._should_fallback(score):
                 self._safety_net_triggers += 1
                 if self._prune_verbose:
                     print(

@@ -385,7 +385,16 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
                     )
                 )
             with torch.no_grad():
-                poses, cot_results = self.autovla.predict(features)
+                _predict_error = None
+                try:
+                    poses, cot_results = self.autovla.predict(features)
+                except (TypeError, IndexError, RuntimeError) as e:
+                    # For 7B base model (no driving fine-tune), action decoding may
+                    # fail because generated tokens don't match the codebook. We still
+                    # want to save captured features/attention from the prefill pass.
+                    _predict_error = e
+                    poses = None
+                    cot_results = None
 
         # ---- post-hoc sanity asserts for capture (cheap; first scene only via
         #      flag we may add later if dominating overhead) ----
@@ -412,6 +421,19 @@ class AutoVLAWithAttentionAgent(AutoVLAAgent):
             assert prompt_index is not None
             scene_token = self._extract_scene_token(scene_data)
             self._save_feature(scene_token, feat_bucket, prompt_index)
+
+        # Re-raise if prediction failed and we're not in capture-only mode
+        if _predict_error is not None:
+            if self._feat_enabled or self._attn_enabled:
+                # In capture mode (feature dump / attention probe), we saved
+                # the data successfully — just return a dummy trajectory
+                import numpy as np
+                dummy_poses = np.zeros((self._trajectory_sampling.num_poses, 3))
+                from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
+                from navsim.common.dataclasses import Trajectory
+                return (Trajectory(dummy_poses, self._trajectory_sampling), cot_results)
+            else:
+                raise _predict_error
 
         submission = False
         if submission:

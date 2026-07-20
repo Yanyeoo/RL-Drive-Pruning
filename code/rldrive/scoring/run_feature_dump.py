@@ -54,7 +54,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", str(args.gpu))
     for pth in (args.checkpoint, args.config, args.codebook):
-        if not Path(pth).exists():
+        if pth and not Path(pth).exists():
             raise FileNotFoundError(pth)
     args.save_dir.mkdir(parents=True, exist_ok=True)
 

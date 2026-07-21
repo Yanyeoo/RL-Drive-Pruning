@@ -107,4 +107,52 @@
 
 ---
 
+---
+
+## 7. SFT 逻辑审视 + RL Reward 改进分析 (7/21 14:55, 用户讨论)
+
+### SFT 当前逻辑
+
+- **标签来源**: Layer-12 attention（last instruction → vision tokens 的注意力权重）
+- **假设**: attention 高 = 对 driving 重要
+- **问题**: attention 高不等于重要（天空亮云 attention 高但无用；远处小车 attention 低但关键）
+- **但实验说明 SFT 是有效的**: scorer (0.8920) > teacher attention (0.8901)，MLP 通过 camera position 等特征学到了超越 attention 的 pattern
+
+### SFT 可改进点（下次可尝试）
+
+**Per-scene loss reweighting**:
+- 对 PDMS_r05 ≈ PDMS_r10 的 scene: loss 权重低（剪什么都行）
+- 对 PDMS_r05 << PDMS_r10 的 scene: loss 权重高（必须选对 token）
+- 不需要重新收集数据，只是训练时加 per-scene weight
+
+### RL Reward 改进（已实现 + push）
+
+**旧 reward 问题**:
+- `reward = PDMS 最终乘积`（6 子指标相乘 → 单标量）
+- 5 个子项 >0.96，只有 progress=0.83 有改进空间
+- 同一 scene 不同 token selection 的 PDMS 差异 <0.01，advantage ≈ 0
+
+**新 reward (Option 1+3 合并)**:
+```
+reward = α * Σ(w_i * sub_i_pruned) + β * Σ(w_i * (sub_i_pruned - sub_i_baseline))
+```
+- α=0.3 (绝对质量：scene 难度感知)
+- β=0.7 (相对 delta：剪了之后变好还是变差)
+- weights: progress=0.35, collision=0.20, drivable=0.15, ttc=0.15, direction=0.10, comfort=0.05
+- baseline = 同 scene r=1.0 的子指标分数（已提取为 `results/baseline_sub_scores.json`）
+
+**为什么这样更好**:
+1. 子指标分开 → 每个维度独立给信号（不会一个=0 全崩）
+2. Delta → scorer 学的是"选对 token 不让开车变差"而非"哪个 scene 简单"
+3. 绝对值辅助 → 训练稳定性（纯 delta 可能振荡）
+
+### 总结判断
+
+| 组件 | 合理性 | 改进空间 |
+|---|---|---|
+| SFT 标签 (L12 attention) | 合理（proxy，但 work） | 小：可加 per-scene reweight |
+| SFT loss (LambdaRank) | 正确（ranking 对 top-K 选择最优） | 无 |
+| RL reward (旧: PDMS 乘积) | **不合理** | **已修** |
+| RL reward (新: shaped delta) | 合理 | 待验证 |
+
 *无人值守开始。下一次 journal 更新在 Phase A 完成后。*

@@ -92,6 +92,11 @@ def parse_args():
     p.add_argument("--shard-id", type=int, default=0, help="Shard id in [0, num_shards)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--prune-variant", choices=["attn_mask", "drop"], default="attn_mask")
+    # Shaped reward (Option 3: sub-metric weighted delta)
+    p.add_argument("--shaped-reward", action="store_true", default=True,
+                   help="Use shaped sub-metric delta reward instead of raw PDMS product")
+    p.add_argument("--baseline-scores", type=str, default=None,
+                   help="Path to JSON with per-scene baseline sub-metric scores (for delta reward)")
     # Logging / checkpointing
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--save-every", type=int, default=50)
@@ -378,6 +383,17 @@ def main():
     reward_fn = PDM_Reward(Path(args.metric_cache))
     cache_tokens = set(reward_fn.metric_cache_loader.metric_cache_paths.keys())
 
+    # --- Baseline sub-scores for shaped reward (Option 3) ---
+    baseline_sub_scores = {}
+    if args.shaped_reward and args.baseline_scores and Path(args.baseline_scores).exists():
+        import json as _json
+        baseline_sub_scores = _json.loads(Path(args.baseline_scores).read_text())
+        print(f"[scorer-grpo] Loaded baseline sub-scores for {len(baseline_sub_scores)} scenes", flush=True)
+    elif args.shaped_reward:
+        print("[scorer-grpo] WARNING: shaped_reward=True but no --baseline-scores provided. "
+              "Using absolute weighted sum (no delta). For best results, provide per-scene "
+              "baseline from r=1.0 eval.", flush=True)
+
     # --- Feature loader (lightweight agent, no VLM) ---
     codebook_path = vlm_config['model']['codebook_cache_path']
     feat_agent = build_feature_loader(args.sensor_data_path, codebook_path)
@@ -453,10 +469,13 @@ def main():
                 if result is None:
                     continue
 
-                # Compute PDMS reward
-                reward = reward_fn.rl_pdm_score(result["trajectory"], result["token"])
-                if reward is None or reward == 0.0:
-                    # score=0 could be legitimate (bad trajectory) — keep it
+                # Compute reward (shaped=True uses sub-metric weighted delta)
+                reward = reward_fn.rl_pdm_score(
+                    result["trajectory"], result["token"],
+                    shaped=getattr(args, 'shaped_reward', True),
+                    baseline_scores=baseline_sub_scores.get(result["token"]),
+                )
+                if reward is None:
                     reward = 0.0
 
                 group_rewards.append(reward)

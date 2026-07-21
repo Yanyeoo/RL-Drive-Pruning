@@ -1,42 +1,40 @@
-"""run_impromptu7b_nuscenes_eval.py — Evaluate our token pruning on Impromptu-VLA 7B.
+"""run_impromptu7b_nuscenes_eval.py — Token-pruned inference on Impromptu-VLA 7B.
 
-Goal: Reproduce FastDriveVLA Table 1 format (L2/Collision/Intersection at 25%/50%/75% pruning)
-on the same Impromptu-VLA 7B backbone, using OUR scorer for token selection.
+Two-step pipeline:
+  Step 1 (this script): Run Impromptu-VLA 7B with our token pruning → output .jsonl
+  Step 2 (their script): evaluation_nuscenes.py reads .jsonl → computes L2/Collision/Intersection
 
-Strategy:
-1. Load Impromptu-VLA 7B (Qwen2.5-VL-7B fine-tuned on nuScenes)
-2. For each nuScenes val scene:
-   a. Forward pass to get vision features + attention (for scorer)
-   b. Apply our 7B scorer to select top-K tokens
-   c. Run generation with pruned tokens (attention mask variant)
-   d. Parse output trajectory (x-y text format)
-3. Compute L2 error at 1s/2s/3s vs GT trajectory
-4. Compare with FastDriveVLA Table 1 numbers
+This lets us directly compare with FastDriveVLA Table 1 (same model, same eval).
 
-Key differences from our NAVSIM pipeline:
-- Model: Impromptu-VLA 7B (not AutoVLA 3B)
-- Output format: text x-y coordinates (not codebook tokens)
-- Eval metric: L2 error (not PDMS)
-- Data: nuScenes val (not NAVSIM navtest)
+Architecture: Qwen2_5_VLForConditionalGeneration (hidden=3584, layers=28)
+Our 7B scorer (ckpt/s3_token_scorer_7b) is directly compatible.
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0 python scripts/run_impromptu7b_nuscenes_eval.py \
+    # Step 1: Generate predictions with pruning
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python scripts/run_impromptu7b_nuscenes_eval.py \
         --model-path models/ImpromptuVLA_7B/7B_AD_finetune \
         --scorer-ckpt ckpt/s3_token_scorer_7b \
         --keep-ratio 0.5 \
-        --data-dir <nuScenes QA data> \
-        --output results/impromptu7b_r05.json
+        --data-json <path_to_nuscenes_test_qa.json> \
+        --output results/impromptu7b/pred_r05.jsonl
+
+    # Step 2: Evaluate (use their script)
+    cd code/third_party/ImpromptuVLA/data_qa_generate
+    python data_engine/datasets/nuscenes/scripts/evaluation_nuscenes.py \
+        --jsonl_file <pred_r05.jsonl> \
+        --output_file results/impromptu7b/eval_r05.json \
+        --mode x-y
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import re
 import sys
 import time
+from io import BytesIO
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -44,234 +42,280 @@ from tqdm import tqdm
 
 ROOT = Path("/apdcephfs/private_shayladeng/tokenrl_autoVLA")
 sys.path.insert(0, str(ROOT / "code"))
-sys.path.insert(0, str(ROOT / "code/third_party/AutoVLA/navsim"))
-sys.path.insert(0, str(ROOT / "code/third_party/AutoVLA"))
 
 
 def parse_args():
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(description="Impromptu-VLA 7B inference with token pruning")
     p.add_argument("--model-path", type=str,
                    default=str(ROOT / "models/ImpromptuVLA_7B/7B_AD_finetune"))
     p.add_argument("--scorer-ckpt", type=str,
                    default=str(ROOT / "ckpt/s3_token_scorer_7b"))
-    p.add_argument("--keep-ratio", type=float, default=0.5)
-    p.add_argument("--data-dir", type=str, default=None,
-                   help="Dir with nuScenes QA jsonl (from Impromptu-VLA data pipeline)")
-    p.add_argument("--output", type=str, default=str(ROOT / "results/impromptu7b_eval.json"))
+    p.add_argument("--keep-ratio", type=float, default=0.5,
+                   help="Fraction of vision tokens to keep (0.25/0.5/0.75/1.0)")
+    p.add_argument("--data-json", type=str, required=True,
+                   help="Path to nuScenes test QA json (ShareGPT format from Impromptu-VLA)")
+    p.add_argument("--output", type=str,
+                   default=str(ROOT / "results/impromptu7b/pred.jsonl"))
     p.add_argument("--max-scenes", type=int, default=None)
-    p.add_argument("--gpu", type=int, default=0)
-    p.add_argument("--baseline", action="store_true",
-                   help="Run without pruning (r=1.0) for baseline comparison")
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--device", type=str, default="cuda:0")
     return p.parse_args()
 
 
-def load_model_and_processor(model_path: str, device: str):
-    """Load Impromptu-VLA 7B using standard HuggingFace transformers."""
-    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+def load_model(model_path: str, device: str):
+    """Load Impromptu-VLA 7B with HuggingFace transformers."""
+    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, AutoTokenizer
 
-    print(f"[eval] Loading model from {model_path}...", flush=True)
+    print(f"[infer] Loading model: {model_path}", flush=True)
     t0 = time.time()
+
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_path,
         torch_dtype=torch.float16,
         device_map=device,
-        attn_implementation="eager",  # needed for attention capture
+        attn_implementation="eager",  # needed for attention hooks
     )
     model.eval()
+
     processor = AutoProcessor.from_pretrained(model_path)
-    print(f"[eval] Model loaded in {time.time()-t0:.1f}s", flush=True)
-    return model, processor
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    print(f"[infer] Model loaded in {time.time()-t0:.1f}s", flush=True)
+    return model, processor, tokenizer
 
 
 def load_scorer(scorer_ckpt: str, device: str):
-    """Load our trained 7B token importance scorer."""
+    """Load our 7B token importance scorer."""
     from rldrive.scoring.token_scorer import ScorerRunner
-    scorer = ScorerRunner(scorer_ckpt, device=device)
-    print(f"[eval] Scorer loaded from {scorer_ckpt}", flush=True)
-    return scorer
+    return ScorerRunner(scorer_ckpt, device=device)
 
 
-def get_vision_token_positions(input_ids: torch.Tensor, image_token_id: int = 151655) -> torch.Tensor:
-    """Find positions of vision tokens in the input sequence."""
-    # Qwen2.5-VL uses a specific token ID for image placeholders
-    # After processing, vision tokens are contiguous blocks
-    positions = (input_ids[0] == image_token_id).nonzero(as_tuple=True)[0]
+def get_vision_positions(input_ids: torch.Tensor) -> torch.Tensor:
+    """Find vision token positions in the input_ids.
+    
+    Qwen2.5-VL uses special tokens for image placeholders:
+    - 151652: <|vision_start|>
+    - 151653: <|vision_end|>  
+    - 151655: <|image_pad|> (the actual vision tokens)
+    """
+    IMAGE_PAD_ID = 151655
+    positions = (input_ids.flatten() == IMAGE_PAD_ID).nonzero(as_tuple=True)[0]
     return positions
 
 
-def apply_attention_mask_pruning(
-    model,
-    prune_positions: torch.Tensor,
-    seq_len: int,
-):
-    """Apply attention mask to prune vision tokens (same as our Variant A)."""
-    # This creates a causal mask where pruned positions cannot be attended to
-    # Implementation mirrors our token_prune_patch.py
-    pass  # Will be filled with actual hook logic during integration
-
-
-def parse_trajectory_from_output(text: str) -> Optional[np.ndarray]:
-    """Parse x-y trajectory points from model output text.
+def capture_layer0_features(model, input_ids, pixel_values, image_grid_thw, device):
+    """Run forward to capture layer-0 vision embeddings for scorer.
     
-    Expected format from Impromptu-VLA:
-    <PLANNING>Trajectory points for the next 3 seconds: [x1, y1], [x2, y2], ...</PLANNING>
-    
-    Or direct coordinate format:
-    (x1, y1), (x2, y2), ...
+    Returns: vision_feat (N_vision, hidden_size=3584)
     """
-    # Try PLANNING tag format first
-    planning_match = re.search(r'<PLANNING>(.*?)</PLANNING>', text, re.DOTALL)
-    if planning_match:
-        text = planning_match.group(1)
+    feat_bucket = {}
     
-    # Extract coordinate pairs
-    pattern = r'\[([^\]]+)\]|\(([^\)]+)\)'
-    matches = re.findall(pattern, text)
+    # Hook into the first decoder layer to capture inputs
+    def hook_fn(module, input, output):
+        # input[0] is hidden_states entering the layer: (bsz, seq, hidden)
+        if "hidden_states" not in feat_bucket:
+            feat_bucket["hidden_states"] = input[0].detach()
     
-    points = []
-    for m in matches:
-        coord_str = m[0] if m[0] else m[1]
-        try:
-            parts = [float(x.strip()) for x in coord_str.split(',')]
-            if len(parts) >= 2:
-                points.append(parts[:2])
-        except (ValueError, IndexError):
-            continue
+    # Register hook on first decoder layer
+    handle = model.model.layers[0].register_forward_pre_hook(hook_fn)
     
-    if len(points) == 0:
-        return None
+    with torch.no_grad():
+        # Just run the prefill (no generation) to get the hidden states
+        outputs = model(
+            input_ids=input_ids.to(device),
+            pixel_values=pixel_values.to(device) if pixel_values is not None else None,
+            image_grid_thw=image_grid_thw.to(device) if image_grid_thw is not None else None,
+            use_cache=False,
+            output_hidden_states=False,
+        )
     
-    return np.array(points)  # (N, 2)
+    handle.remove()
+    
+    # Extract vision token features
+    hidden_states = feat_bucket["hidden_states"]  # (1, seq, 3584)
+    vision_positions = get_vision_positions(input_ids)
+    
+    if len(vision_positions) == 0:
+        return None, vision_positions
+    
+    vision_feat = hidden_states[0, vision_positions, :]  # (N_vision, 3584)
+    return vision_feat, vision_positions
 
 
-def compute_l2_metrics(pred_traj: np.ndarray, gt_traj: np.ndarray) -> dict:
-    """Compute L2 displacement error at 1s, 2s, 3s.
+def apply_vision_prune_mask(model, prune_positions: torch.Tensor, seq_len: int):
+    """Create an attention mask that prevents attending to pruned vision tokens.
     
-    Both trajectories are in ego-relative coordinates (x=lateral, y=longitudinal).
-    Assumes 2Hz sampling (0.5s per step).
+    Same logic as our Variant A (attn_mask) in token_prune_patch.py.
+    Returns a 2D attention mask (1, seq_len) where pruned positions are 0.
     """
-    # Cumulative sum to get absolute positions (if trajectories are displacements)
-    # Impromptu-VLA outputs cumulative positions from ego origin
+    mask = torch.ones(1, seq_len, dtype=torch.long)
+    if prune_positions is not None and len(prune_positions) > 0:
+        mask[0, prune_positions] = 0
+    return mask
+
+
+def run_inference_with_pruning(
+    model, processor, tokenizer, scorer,
+    sample: dict, keep_ratio: float, device: str
+) -> Optional[str]:
+    """Run one sample through the model with token pruning.
     
-    metrics = {}
-    # At 2Hz: 1s=2steps, 2s=4steps, 3s=6steps
-    for t_sec, t_steps in [(1, 2), (2, 4), (3, 6)]:
-        if t_steps <= len(pred_traj) and t_steps <= len(gt_traj):
-            pred_pos = pred_traj[t_steps - 1]
-            gt_pos = gt_traj[t_steps - 1]
-            l2 = np.sqrt(np.sum((pred_pos - gt_pos) ** 2))
-            metrics[f"L2_{t_sec}s"] = float(l2)
-        else:
-            metrics[f"L2_{t_sec}s"] = float('inf')
+    Args:
+        sample: dict with 'messages' and 'images' keys (ShareGPT format)
+        keep_ratio: fraction of vision tokens to keep
     
-    # Average L2
-    valid = [v for v in metrics.values() if v != float('inf')]
-    metrics["L2_avg"] = float(np.mean(valid)) if valid else float('inf')
+    Returns:
+        Generated text string (contains <PLANNING>...</PLANNING>)
+    """
+    # 1. Prepare inputs using processor
+    messages = sample["messages"]
+    images = sample.get("images", [])
     
-    return metrics
+    # Build the chat text (without images inline)
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
+    # Process with images
+    if images:
+        from PIL import Image
+        pil_images = []
+        for img_path in images:
+            if os.path.exists(img_path):
+                pil_images.append(Image.open(img_path).convert("RGB"))
+            else:
+                # Try relative to data root
+                # TODO: configure image root path
+                pil_images.append(Image.open(img_path).convert("RGB"))
+        
+        inputs = processor(
+            text=[text],
+            images=pil_images,
+            padding=True,
+            return_tensors="pt",
+        )
+    else:
+        inputs = tokenizer(text, return_tensors="pt")
+    
+    input_ids = inputs["input_ids"].to(device)
+    pixel_values = inputs.get("pixel_values")
+    image_grid_thw = inputs.get("image_grid_thw")
+    
+    # 2. If pruning enabled, capture features and score
+    if keep_ratio < 1.0 and scorer is not None:
+        vision_feat, vision_positions = capture_layer0_features(
+            model, input_ids, pixel_values, image_grid_thw, device
+        )
+        
+        if vision_feat is not None and len(vision_positions) > 0:
+            n_vision = len(vision_positions)
+            n_keep = max(1, int(n_vision * keep_ratio))
+            
+            # Score tokens
+            # Scorer expects: (N, emb_dim + n_cam) but for simplicity,
+            # we can use the vision features directly if scorer handles it
+            scores = scorer.score(vision_feat)  # (N_vision,)
+            
+            # Select top-K
+            _, top_indices = scores.topk(n_keep)
+            keep_set = set(top_indices.cpu().numpy())
+            
+            # Prune positions = vision positions NOT in top-K
+            prune_positions = torch.tensor(
+                [pos.item() for i, pos in enumerate(vision_positions) if i not in keep_set],
+                dtype=torch.long
+            )
+            
+            # Create attention mask with pruned positions masked
+            attention_mask = apply_vision_prune_mask(model, prune_positions, input_ids.shape[1])
+            inputs["attention_mask"] = attention_mask.to(device)
+    
+    # 3. Generate
+    with torch.no_grad():
+        gen_kwargs = {
+            "max_new_tokens": 512,
+            "temperature": 0.01,
+            "top_p": 0.001,
+            "top_k": 1,
+            "do_sample": False,
+        }
+        
+        generate_inputs = {
+            "input_ids": input_ids,
+            "attention_mask": inputs.get("attention_mask", torch.ones_like(input_ids)).to(device),
+        }
+        if pixel_values is not None:
+            generate_inputs["pixel_values"] = pixel_values.to(device)
+        if image_grid_thw is not None:
+            generate_inputs["image_grid_thw"] = image_grid_thw.to(device)
+        
+        output_ids = model.generate(**generate_inputs, **gen_kwargs)
+    
+    # 4. Decode output (skip input tokens)
+    generated = tokenizer.decode(
+        output_ids[0, input_ids.shape[1]:],
+        skip_special_tokens=True
+    )
+    
+    return generated
 
 
 def main():
     args = parse_args()
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", str(args.gpu))
-    device = "cuda:0"
+    device = args.device
     
     # Load model + scorer
-    model, processor = load_model_and_processor(args.model_path, device)
+    model, processor, tokenizer = load_model(args.model_path, device)
     
-    if not args.baseline:
+    scorer = None
+    if args.keep_ratio < 1.0:
         scorer = load_scorer(args.scorer_ckpt, device)
+    
+    # Load data (ShareGPT format JSON from Impromptu-VLA)
+    print(f"[infer] Loading data from {args.data_json}", flush=True)
+    with open(args.data_json, "r") as f:
+        data = json.load(f)
+    
+    if isinstance(data, dict) and "data" in data:
+        samples = data["data"]
+    elif isinstance(data, list):
+        samples = data
     else:
-        scorer = None
-    
-    keep_ratio = 1.0 if args.baseline else args.keep_ratio
-    print(f"[eval] keep_ratio={keep_ratio} baseline={args.baseline}", flush=True)
-    
-    # Load evaluation data
-    # TODO: Integrate with Impromptu-VLA's nuScenes data loader
-    # For now, this is a placeholder for the data loading logic
-    if args.data_dir is None:
-        print("[eval] ERROR: --data-dir required. Point to Impromptu-VLA nuScenes QA data.", flush=True)
-        print("[eval] Generate with: python data_qa_generate/data_engine/datasets/nuscenes/scripts/evaluation_nuscenes.py", flush=True)
-        sys.exit(1)
-    
-    # Load jsonl data (Impromptu-VLA format)
-    data_path = Path(args.data_dir)
-    if data_path.suffix == '.jsonl':
-        samples = [json.loads(l) for l in data_path.read_text().splitlines() if l.strip()]
-    elif data_path.is_dir():
-        # Look for the evaluation jsonl
-        jsonl_files = list(data_path.glob("*.jsonl"))
-        if not jsonl_files:
-            print(f"[eval] ERROR: no .jsonl files in {data_path}", flush=True)
-            sys.exit(1)
-        samples = []
-        for f in jsonl_files:
-            samples.extend([json.loads(l) for l in f.read_text().splitlines() if l.strip()])
-    else:
-        print(f"[eval] ERROR: {data_path} not found", flush=True)
+        print(f"[infer] ERROR: unexpected data format in {args.data_json}", flush=True)
         sys.exit(1)
     
     if args.max_scenes:
         samples = samples[:args.max_scenes]
     
-    print(f"[eval] Loaded {len(samples)} samples", flush=True)
+    print(f"[infer] {len(samples)} samples, keep_ratio={args.keep_ratio}", flush=True)
     
-    # Run evaluation
-    results = []
+    # Run inference
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
     n_ok = n_err = 0
     
-    for idx, sample in enumerate(tqdm(samples, desc="Evaluating")):
-        try:
-            # TODO: Full integration with Impromptu-VLA's inference + our pruning
-            # This requires:
-            # 1. Process images through Qwen2.5-VL vision encoder
-            # 2. Capture layer-0 features for scorer
-            # 3. Score tokens, select top-K
-            # 4. Apply attention mask on pruned tokens
-            # 5. Generate text output
-            # 6. Parse trajectory
-            # 7. Compare with GT
-            
-            # Placeholder for actual implementation
-            pass
-            
-        except Exception as e:
-            n_err += 1
-            if n_err <= 5:
-                print(f"[eval] [{idx}] ERROR: {e}", flush=True)
+    with open(args.output, "w") as fout:
+        for idx, sample in enumerate(tqdm(samples, desc=f"Infer r={args.keep_ratio}")):
+            try:
+                pred_text = run_inference_with_pruning(
+                    model, processor, tokenizer, scorer,
+                    sample, args.keep_ratio, device
+                )
+                
+                # Write in the format expected by evaluation_nuscenes.py
+                # {"predict": "<PLANNING>...", "label": "...", ...}
+                out_record = {
+                    "predict": pred_text,
+                    "label": sample["messages"][-1]["content"] if len(sample["messages"]) > 1 else "",
+                }
+                fout.write(json.dumps(out_record, ensure_ascii=False) + "\n")
+                n_ok += 1
+                
+            except Exception as e:
+                n_err += 1
+                fout.write(json.dumps({"predict": "", "label": ""}) + "\n")
+                if n_err <= 5:
+                    print(f"[infer] [{idx}] ERROR: {type(e).__name__}: {e}", flush=True)
     
-    # Compute aggregate metrics
-    if results:
-        avg_metrics = {}
-        for key in results[0].keys():
-            vals = [r[key] for r in results if key in r and r[key] != float('inf')]
-            avg_metrics[key] = float(np.mean(vals)) if vals else None
-        
-        # Compute relative performance (vs no-prune baseline)
-        # Rel. = baseline_L2 / pruned_L2 * 100% (higher is better)
-        print(f"\n[eval] Results (keep_ratio={keep_ratio}, N={len(results)}):")
-        for k, v in avg_metrics.items():
-            print(f"  {k}: {v:.4f}" if v else f"  {k}: N/A")
-        
-        # Save
-        output = {
-            "config": {
-                "model": args.model_path,
-                "scorer": args.scorer_ckpt,
-                "keep_ratio": keep_ratio,
-                "n_samples": len(results),
-                "baseline": args.baseline,
-            },
-            "metrics": avg_metrics,
-            "per_sample": results,
-        }
-        os.makedirs(os.path.dirname(args.output), exist_ok=True)
-        with open(args.output, "w") as f:
-            json.dump(output, f, indent=2)
-        print(f"[eval] Saved to {args.output}")
-    else:
-        print("[eval] No results generated. Integration TODO.")
+    print(f"\n[infer] DONE: {n_ok} ok, {n_err} err -> {args.output}", flush=True)
+    print(f"[infer] Next step: run evaluation_nuscenes.py --jsonl_file {args.output} --mode x-y")
 
 
 if __name__ == "__main__":

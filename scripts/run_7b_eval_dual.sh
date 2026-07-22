@@ -10,9 +10,9 @@ PY="/apdcephfs/private_shayladeng/miniconda3/envs/autovla/bin/python"
 export PYTHONPATH="$ROOT/code:$ROOT/code/third_party/AutoVLA:$ROOT/code/third_party/AutoVLA/navsim:${PYTHONPATH:-}"
 
 MODEL_PATH="$ROOT/models/ImpromptuVLA_7B/7B_AD_finetune"
-SCORER_7B="$ROOT/ckpt/s3_token_scorer_7b"
+SCORER_7B="${SCORER_CKPT:-$ROOT/ckpt/s3_token_scorer_7b}"
 DATA_DIR="$ROOT/data/nuscenes_impromptu_val/unpacked"
-OUTDIR="$ROOT/results/impromptu7b"
+OUTDIR="${IMPROMPTU_OUT:-$ROOT/results/impromptu7b}"
 LOGDIR="$ROOT/logs/_7b_impromptu"
 mkdir -p "$OUTDIR" "$LOGDIR"
 

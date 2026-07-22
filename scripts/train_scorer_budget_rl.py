@@ -118,11 +118,16 @@ def load_autovla_for_inference(config_path, ckpt_path, sensor_data_path, device)
         'max_length': 2048, 'temperature': 0.01, 'top_k': 0, 'top_p': 1.0,
     }
     autovla = AutoVLA(config, inference=True, device=device)
-    sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    if 'state_dict' in sd:
-        sd = sd['state_dict']
-    new_sd = {k.replace("autovla.", ""): v for k, v in sd.items()}
-    autovla.load_state_dict(new_sd, strict=False)
+    # Empty ckpt_path => load base HF weights from the model dir referenced by
+    # config (same behaviour as run_feature_dump --checkpoint ""). Used for 7B
+    # Budget RL, where the driving-finetuned 7B is an HF dir with no single
+    # .ckpt, and we train on base-Qwen2.5-VL-7B features (matching s3_token_scorer_7b).
+    if ckpt_path:
+        sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        if 'state_dict' in sd:
+            sd = sd['state_dict']
+        new_sd = {k.replace("autovla.", ""): v for k, v in sd.items()}
+        autovla.load_state_dict(new_sd, strict=False)
     autovla.eval()
     for p in autovla.parameters():
         p.requires_grad_(False)

@@ -42,7 +42,8 @@ run_job(){
       agent._target_=rldrive.agents.autovla_with_token_prune.AutoVLAWithTokenPruneAgent \
       +agent.config_path="$YAML" +agent.checkpoint_path="$CKPT" +agent.sensor_data_path="$SENSOR" \
       +agent.codebook_cache_path="$AUTOVLA_ROOT/codebook_cache/agent_vocab.pkl" \
-      +agent.lora_conf.use_lora=false +agent.keep_ratio="$kr" +agent.selector="$sel" $extra \
+      +agent.lora_conf.use_lora=false +agent.keep_ratio="$kr" +agent.selector="$sel" \
+      +agent.prune_variant=drop $extra \
       +agent.prune_verbose=false worker=single_machine_thread_pool worker.max_workers=1
   ) > "logs/_mt_${exp}.log" 2>&1; local rc=$?
   local c; c=$(ls -t "$NAVSIM_EXP_ROOT/$exp"/*/*.csv 2>/dev/null | head -1)

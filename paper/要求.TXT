@@ -1,0 +1,144 @@
+我们目前是匿名投稿阶段（tex已经下好了）
+
+## 一、共同的论文格式要求
+
+`AnonymousSubmission2027.tex` 和 `CameraReady2027.tex` 的主体格式基本相同：
+
+- 必须使用 `aaai2027.sty` 和 `aaai2027.bst`。
+- 使用 PDFLaTeX 编译。
+- US Letter 纸张，双栏排版。
+- 正文为 10 pt、12 pt 行距。
+- 不得修改模板的页边距、字号、行距、浮动体间距或字体。
+- 不得出现页码、页眉、页脚、书签和嵌入式链接。
+- 所有字体必须嵌入，禁止 Type 3 字体。
+- 不能使用 `hyperref`、`geometry`、`times`、`authblk`、`balance`、`float`、`titlesec`、`ulem`、`pgfplots` 等禁用包。
+- 禁止用负 `\vspace`、负 `\vskip`、`\newpage`、`\clearpage`、`\pagebreak` 等命令挤压版面。
+- 内容不得超出页边距或双栏中缝，必须处理所有 overfull box。
+- 标题使用英文 Title Case。
+- 摘要中不能引用文献。
+- 参考文献使用 BibTeX 和 AAAI 格式，正文引用采用作者—年份格式。
+- 章节编号可选；最多编号到 subsection，不要给 subsubsection 编号。
+
+页面规格：
+
+- 首页面顶边距：1.25 英寸
+- 其他页面顶边距：0.75 英寸
+- 左右边距：0.75 英寸
+- 底边距：1.25 英寸
+- 每栏约 3.3 英寸
+- 栏间距：0.375 英寸
+
+## 二、图片、表格和算法要求
+
+- 图片只能使用 `.pdf`、`.png` 或 `.jpg`。
+- 禁止 `.eps`、`.ps`、`.gif`。
+- 位图建议至少 300 dpi。
+- 图片应在外部裁剪和调整尺寸，禁止使用 `trim`、`clip`。
+- 图片内文字至少 9 pt，字体必须嵌入。
+- 图题放在图片下方，使用 10 pt 正体。
+- 表格正文通常为 10 pt，必要时最低可用 9 pt。
+- 表题也放在表格下方。
+- 禁止用 `\resizebox` 整体缩小表格。
+- 超过单栏宽度的图表使用 `figure*` 或 `table*`。
+- 图表应靠近首次引用的位置，通常放在页面顶部或底部。
+- 颜色不能是区分信息的唯一方式，需要保证灰度打印仍可理解。
+- 算法和代码清单作为浮动体放置，标题位于其顶部。
+
+## 三、匿名投稿文件
+
+`AnonymousSubmission2027.tex` 用于审稿阶段：
+
+```latex
+\usepackage[submission]{aaai2027}
+```
+
+特殊要求：
+
+- 不得出现真实作者姓名和单位。
+- 作者位置填写 `Anonymous Submission`，单位留空。
+- 清除 PDF 元数据中的作者等身份信息。
+- 自引不得暴露作者身份。
+- 代码、数据和项目链接不得去匿名化。
+- 第一页不显示版权声明。
+- 此阶段通常不需要版权转让文件。
+- 补充材料和可复现性清单是否提交，以具体会议通知为准。
+- 致谢通常应在匿名投稿阶段删除，因为容易暴露身份。
+
+## 四、Camera-Ready 最终稿
+
+`CameraReady2027.tex` 用于录用后的正式版本：
+
+```latex
+\usepackage{aaai2027}
+```
+
+特殊要求：
+
+- 填写真实作者、单位、地址和电子邮箱。
+- 多单位作者使用上标编号对应。
+- 共同一作使用 `\equalcontrib`。
+- 通讯作者使用 `\corresponding`。
+- 不得用表格或 `authblk` 排版作者信息。
+- 第一页版权信息由模板自动生成，不得关闭。
+- 需要按要求提交版权文件。
+- 可以在摘要之后加入 Code、Datasets、Extended Version 等链接。
+- 致谢放在参考文献之前，使用无编号标题：
+
+```latex
+\section*{Acknowledgments}
+```
+
+推荐内容顺序：
+
+1. 正文
+2. 内容附录（可选，计入页数）
+3. Ethical Statement（可选）
+4. Acknowledgments（可选）
+5. References
+6. Supplementary Material（仅在会议允许时）
+
+提交时通常需要：
+
+- 最终 PDF
+- 单个主 `.tex` 文件
+- `.bib` 文件
+- 实际使用的图片
+- 必要的编译文件
+- ZIP 压缩包不超过 10 MB
+- 主文件建议以第一作者姓氏命名
+
+## 五、可复现性清单
+
+`ReproducibilityChecklist.tex` 不是正文模板，而是问卷。
+
+只应把：
+
+```latex
+Type your response here
+```
+
+替换成题目允许的答案，例如：
+
+```latex
+yes
+no
+partial
+NA
+```
+
+不要修改 `\question` 命令或问题文字。
+
+它主要检查四方面：
+
+- 论文结构是否清楚，是否提供方法概述、伪代码及背景资料。
+- 理论贡献是否明确陈述假设、定理、证明和理论依据。
+- 数据集是否有引用、公开许可、选择理由和详细说明。
+- 实验是否报告代码、随机种子、软硬件环境、超参数、运行次数、统计显著性和结果方差。
+
+清单可以单独编译，也可以按会议要求放在论文末尾：
+
+```latex
+\input{ReproducibilityChecklist.tex}
+```
+
+最核心的区别是：**匿名投稿使用 AnonymousSubmission，录用终稿使用 CameraReady，Checklist 根据会议要求填写和提交。**

@@ -49,7 +49,7 @@ Existing pruning methods apply scene-agnostic heuristics that cannot adapt to dr
 We propose \ours{}, a plug-and-play framework that learns \textbf{driving-aware dynamic token pruning} via reinforcement learning.
 A 0.6M-parameter MLP scorer, initialized by LambdaRank distillation from the VLA's internal attention, is progressively refined: first with a shaped driving reward decomposing six sub-metrics into independent gradient signals, then with an adaptive \emph{budget head} that jointly learns \emph{which} tokens to keep and \emph{how many} per scene via an efficiency-aware RL objective---eliminating fixed pruning ratios entirely.
 On NAVSIM closed-loop evaluation ($N{\approx}11{,}576$ scenes), \ours{} with true token removal \textbf{surpasses the unpruned baseline} (PDMS 0.9045 vs.\ 0.8988, Rel.\ 100.6\%) at 50\% token reduction with 15\% wall-clock speedup and 33.6\% FLOPs saving, dominating all baselines by $+$2.8--9.6pt.
-The scorer transfers zero-shot from a 3B backbone to a fine-tuned 7B driving VLA (ImpromptuVLA) without retraining, confirming plug-and-play cross-model generalization.
+The same training method generalizes to a 7B driving VLA: a scorer trained from an unfinetuned Qwen-7B backbone also attaches plug-and-play to ImpromptuVLA-7B, confirming that our approach---not a specific set of weights---scales across model sizes.
 \end{abstract}
 
 % ============================================================================
@@ -80,22 +80,22 @@ Naively using this product as reward yields extreme sparsity (any sub-score reac
 We address this gap with \ours{}, a two-stage framework built on three key insights:
 \begin{enumerate}[nosep,leftmargin=*]
 \item \textbf{SFT as warm-start, not ceiling}: A 0.6M-parameter MLP scorer distilled from the VLA's layer-12 attention via LambdaRank provides a strong initialization (already surpassing its attention teacher by $+0.19$pt). However, attention $\neq$ driving importance---high-attention tokens (e.g., textured sky) may be irrelevant while low-attention tokens (e.g., distant vehicles) may be safety-critical.
-\item \textbf{Shaped driving reward breaks the SFT ceiling}: We fine-tune the scorer via REINFORCE with a \emph{shaped} reward that decomposes PDMS into six weighted sub-metric deltas, providing 10--100$\times$ stronger gradient signal than the naive product. This enables the scorer to discover driving-critical importance patterns invisible to generic attention.
+\item \textbf{Efficiency-aware RL learns a scene-adaptive budget}: We fine-tune the scorer via REINFORCE with a \emph{shaped} reward that decomposes PDMS into six weighted sub-metric deltas, providing 10--100$\times$ stronger gradient signal than the naive product, and add an adaptive \emph{budget head} that lets the policy decide per-scene \emph{how many} tokens to keep---correcting the driving-relevance bias inherited from attention distillation.
 \item \textbf{``What to keep = how many to keep''}: Combined with a global threshold ($\tau$-cut), the calibrated scorer naturally produces scene-adaptive keep-ratios (ranging from 30\% to 92\% across scenes, std$=$0.085)---simultaneously deciding \emph{which} and \emph{how many} tokens to retain without a separate budget controller.
 \end{enumerate}
 
 % ¶5 Plug-and-play + generalization
 The resulting scorer is \emph{plug-and-play}: a 0.6M-parameter MLP attached to any VLA's ViT$\to$LLM interface with $<$1ms overhead, requiring no modification to the frozen VLA backbone.
-We demonstrate zero-shot cross-model transfer (3B$\to$7B) and cross-dataset generalization, revealing a scaling law: larger VLAs concentrate attention more sharply (95.9\% in top-25\% tokens at 7B vs.\ 91.6\% at 3B), tolerating more aggressive pruning.
+We demonstrate that the same training method generalizes across model sizes (3B$\to$7B) and to new datasets, revealing a scaling law: larger VLAs concentrate attention more sharply (95.9\% in top-25\% tokens at 7B vs.\ 91.6\% at 3B), tolerating more aggressive pruning.
 
 % ¶6 Results summary
 On NAVSIM navtest ($N{\approx}11{,}576$), with true token removal (Variant~B):
 \begin{itemize}[nosep,leftmargin=*]
 \item \ours{} at $r{=}0.5$ achieves \textbf{PDMS 0.9045} (Rel.\ 100.6\%), \emph{surpassing the unpruned baseline} while removing 50\% of vision tokens---enabled by a confidence-based fallback that gracefully handles 6.6\% uncertain scenes.
-\item Budget RL (fully adaptive) achieves the best dynamic performance, automatically varying keep-ratios from 20\% to 90\% per scene without any fixed threshold.
+\item Budget RL (fully adaptive) removes the need for any fixed threshold, automatically varying keep-ratios from 20\% to 90\% per scene through the learned budget head.
 \item At $r{=}0.75$, \ours{} achieves near-lossless pruning ($-0.05$pt, $p{=}0.58$, 16.9\% FLOPs saving).
 \item True token removal delivers \textbf{15\% wall-clock speedup} and 33.6\% FLOPs reduction at $r{=}0.5$.
-\item The scorer transfers zero-shot to ImpromptuVLA-7B on nuScenes, confirming cross-model plug-and-play generalization.
+\item A scorer trained with the same method on an unfinetuned Qwen-7B backbone works plug-and-play on ImpromptuVLA-7B (nuScenes), confirming cross-model method generalization.
 \end{itemize}
 
 % ¶7 Contributions
@@ -103,7 +103,7 @@ Our contributions are:
 \begin{enumerate}[nosep,leftmargin=*]
 \item A \textbf{driving-reward-guided dynamic pruning framework} for AD-VLAs: the first to use shaped sub-metric driving rewards (collision, progress, comfort, etc.) for RL-optimized token selection, solving the reward sparsity that defeats naive composite metrics.
 \item A \textbf{plug-and-play scorer with $\tau$-cut} (0.6M parameters, $<$1ms) that jointly learns what and how many tokens to retain per scene without manual budget tuning, producing scene-adaptive keep-ratios from 30\% to 92\%.
-\item \textbf{Cross-model generalization and scaling analysis}: the scorer trained on a 3B VLA transfers zero-shot to 7B models and new datasets, with cross-scale analysis revealing that larger VLAs exhibit significantly greater vision-token redundancy.
+\item \textbf{Cross-model generalization and scaling analysis}: the same training method generalizes from a 3B VLA to 7B models and new datasets, with cross-scale analysis revealing that larger VLAs exhibit significantly greater vision-token redundancy.
 \end{enumerate}
 
 % ============================================================================
@@ -210,6 +210,12 @@ A_i = \frac{R_i - \bar{R}_G}{\sigma_G + \epsilon}
 \end{equation}
 
 The total loss is $\mathcal{L} = \mathcal{L}_\text{RL} + \mathcal{L}_\text{KL}$.
+
+\textbf{Budget head (scene-adaptive \emph{how-many}).}
+Beyond the token scorer that selects \emph{which} tokens, a lightweight budget network $g_\phi$ outputs a continuous keep-ratio $\mu_\phi \in [0.2, 0.9]$ with a learnable log-std $\sigma_\phi$, forming a Gaussian policy over the budget space; the effective keep count is $K = \lfloor \mu_\phi N \rfloor$, sampled and fed to top-$K$ selection.
+Crucially, \emph{both} the token scorer and the budget head are optimized by the same RL objective---the policy-gradient loss combines the selection log-probability and the budget log-probability---while the KL penalty $\mathcal{L}_\text{KL}$ is applied \textbf{only} to the token scorer ($\beta_\text{KL}{=}0.01$) to anchor it to its SFT initialization and prevent catastrophic drift; the budget head learns freely ($\beta_\text{budget}{=}0$).
+The reward further adds an efficiency bonus $\beta_\text{eff}(1{-}\mu_\phi)$ that incentivizes aggressive pruning when driving quality permits, so the policy learns minimal-pruning decisions for safety-critical scenes directly from reward rather than via a hand-crafted fallback.
+
 Training uses the frozen VLM as the ``environment'': each scorer update requires only VLM inference (no backward through VLM), making it computationally efficient.
 
 \subsection{Adaptive Pruning via $\tau$-Cut}
@@ -387,7 +393,7 @@ Budget RL further adds an efficiency bonus $\beta(1{-}r)$ that incentivizes aggr
 We present \ours{}, a reinforcement-learning-based vision token pruning framework for autonomous driving VLAs.
 Our key innovation is a progressive training pipeline---LambdaRank distillation $\to$ shaped RL $\to$ Budget RL---that culminates in a scorer that \emph{autonomously} determines both which tokens to keep and how many per scene, eliminating fixed pruning ratios entirely.
 With true token removal and a lightweight confidence-based fallback, \ours{} \textbf{surpasses the unpruned baseline} (PDMS 0.9045 vs.\ 0.8988, Rel.\ 100.6\%) while delivering 15\% wall-clock speedup and 33.6\% FLOPs reduction---demonstrating that removing noisy vision tokens can \emph{improve} driving quality.
-The scorer transfers zero-shot from 3B to 7B VLAs (ImpromptuVLA on nuScenes) without retraining, confirming the plug-and-play nature of the approach.
+The same training method generalizes from 3B to 7B VLAs: a scorer trained from an unfinetuned Qwen-7B backbone works plug-and-play on ImpromptuVLA (nuScenes) without modifying the 7B VLA, confirming that the approach---not a specific set of weights---scales across model sizes.
 Our shaped reward design---decomposing driving quality into six independent sub-metric signals---provides a general solution to the reward sparsity challenge in RL for composite-metric optimization, with potential applications beyond token pruning.
 
 % ============================================================================

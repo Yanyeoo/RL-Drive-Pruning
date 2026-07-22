@@ -13,8 +13,13 @@ RL training:
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import torch
 import torch.nn as nn
+
+from rldrive.scoring.token_scorer import cam_id_from_blocks, cam_onehot
 
 
 class TokenScorerWithBudget(nn.Module):
@@ -82,3 +87,46 @@ class TokenScorerWithBudget(nn.Module):
         # Copy token_net weights from base scorer
         model.token_net.load_state_dict(base_scorer.net.state_dict())
         return model
+
+
+class BudgetScorerRunner:
+    """Loads a trained TokenScorerWithBudget; returns per-token scores AND the
+    scene-level learned keep_ratio (deterministic, policy mean — for EVAL).
+
+    This is the missing eval path for Budget RL: instead of pruning at a fixed
+    global ratio, each scene gets its own keep_ratio from the budget head, then
+    the top-B tokens (by token_scores) are pruned at that per-scene ratio.
+    """
+
+    def __init__(self, ckpt_dir: str, device: str = "cpu"):
+        ckpt_dir = Path(ckpt_dir)
+        cfg = json.loads((ckpt_dir / "config.json").read_text())
+        self.n_cam = int(cfg["n_cam"])
+        self.emb_dim = int(cfg["emb_dim"])
+        self.min_kr = float(cfg.get("min_keep_ratio", 0.2))
+        self.max_kr = float(cfg.get("max_keep_ratio", 0.9))
+        self.model = TokenScorerWithBudget(
+            emb_dim=self.emb_dim, n_cam=self.n_cam,
+            hidden=int(cfg["hidden"]),
+            min_keep_ratio=self.min_kr, max_keep_ratio=self.max_kr,
+        )
+        sd = torch.load(ckpt_dir / "checkpoint.pt", map_location=device, weights_only=False)
+        self.model.load_state_dict(sd)
+        self.model.eval().to(device)
+        norm = torch.load(ckpt_dir / "feature_norm.pt", map_location=device, weights_only=False)
+        self.mean = norm["mean"].to(device)
+        self.std = norm["std"].to(device)
+        self.device = device
+
+    def build_input(self, vision_feat, vision_token_positions, vision_blocks):
+        emb = (vision_feat.to(self.device) - self.mean) / self.std
+        cam = cam_id_from_blocks(vision_token_positions, vision_blocks)
+        coh = cam_onehot(cam, self.n_cam).to(self.device)
+        return torch.cat([emb, coh], dim=-1)
+
+    @torch.no_grad()
+    def score_budget(self, vision_feat, vision_token_positions, vision_blocks):
+        """Returns (token_scores_cpu, keep_ratio_float)."""
+        x = self.build_input(vision_feat, vision_token_positions, vision_blocks)
+        token_scores, keep_ratio, _ = self.model(x)
+        return token_scores.detach().to("cpu", torch.float32), float(keep_ratio.item())

@@ -44,6 +44,7 @@ from rldrive.agents.token_prune_patch import (
 from rldrive.agents.token_prune_patch_varB import patch_vision_token_drop
 from rldrive.scoring.attention_capture import patch_attention_capture, patch_vision_feature_capture
 from rldrive.scoring.token_scorer import ScorerRunner
+from rldrive.scoring.token_scorer_budget import BudgetScorerRunner
 
 
 class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
@@ -126,7 +127,7 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
             )
         if self._selector not in (
             "attn_L12", "random", "scorer", "scorer_taucut", "fastv_l2",
-            "sparsevlm_text", "prumerge_cls",
+            "sparsevlm_text", "prumerge_cls", "scorer_budget",
         ):
             raise ValueError(f"unknown selector '{self._selector}'")
         # FastV-at-input baseline: uses layer-2 attention as selector at ViT→LLM
@@ -146,6 +147,7 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
         # which is the PruMerge ranking basis. Training-free.
 
         self._scorer = None
+        self._budget_runner = None
         if self._selector in ("scorer", "scorer_taucut"):
             if not scorer_ckpt:
                 raise ValueError(f"selector='{self._selector}' requires scorer_ckpt=<dir>")
@@ -156,6 +158,14 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
             print(f"[AutoVLAWithTokenPruneAgent] loaded scorer from {scorer_ckpt} "
                   f"(feat_layer={self._scorer_feat_layer})"
                   f"{f', tau={self._tau}' if self._tau is not None else ''}", flush=True)
+        elif self._selector == "scorer_budget":
+            if not scorer_ckpt:
+                raise ValueError("selector='scorer_budget' requires scorer_ckpt=<dir>")
+            dev = "cuda" if (not skip_model_load) else "cpu"
+            self._budget_runner = BudgetScorerRunner(scorer_ckpt, device=dev)
+            print(f"[AutoVLAWithTokenPruneAgent] loaded BUDGET scorer from {scorer_ckpt} "
+                  f"(per-scene dynamic keep_ratio in [{self._budget_runner.min_kr}, "
+                  f"{self._budget_runner.max_kr}])", flush=True)
 
         print(
             f"[AutoVLAWithTokenPruneAgent] keep_ratio={self._keep_ratio} "
@@ -311,6 +321,34 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
             )
         return bucket["vision_attn"].flatten()  # (N_vision,) cpu float32
 
+    def _score_budget_for(self, scene_token: Optional[str], n: int,
+                          features: Dict[str, Any], prompt_index, input_ids=None):
+        """Budget selector: capture features, run TokenScorerWithBudget -> (token_scores, keep_ratio).
+
+        Returns (score, keep_ratio) where keep_ratio is the scene-level learned budget
+        (deterministic policy mean). The caller prunes top-B tokens at that per-scene ratio.
+        """
+        fbucket: Dict[str, Any] = {}
+        with patch_vision_feature_capture(
+            vlm=self.autovla.vlm,
+            layer_idx=self._scorer_feat_layer,
+            prompt_index=prompt_index,
+            bucket=fbucket,
+        ):
+            with torch.no_grad():
+                self.autovla.predict(features)  # pass-1: trajectory discarded
+        if "vision_feat" not in fbucket:
+            raise RuntimeError(
+                f"[token_budget] pass-1 feature capture did not fire "
+                f"(scene={scene_token}); check feat layer {self._scorer_feat_layer}."
+            )
+        score, keep_ratio = self._budget_runner.score_budget(
+            fbucket["vision_feat"],
+            prompt_index.vision_token_positions,
+            prompt_index.vision_blocks,
+        )
+        return score.flatten().to(torch.float32), keep_ratio
+
     def compute_trajectory(self, scene_data):  # type: ignore[override]
         self.autovla.eval()
 
@@ -341,6 +379,33 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
                     f"-> keep {n_keep}/{n} ({n_keep/n:.3f}), prune {int(prune_positions.numel())}",
                     flush=True,
                 )
+        elif self._selector == "scorer_budget":
+            prompt_index, input_ids = self._build_prompt_index(features)
+            n = prompt_index.n_vision
+            scene_token = self._extract_scene_token(scene_data)
+            score, kr = self._score_budget_for(scene_token, n, features, prompt_index, input_ids)
+            # Variant B denylist: skip pruning for known catastrophic scenes
+            if self._varB_denylist and scene_token in self._varB_denylist:
+                if self._prune_verbose:
+                    print(f"[token_budget] DENYLIST scene={scene_token} -> skip prune", flush=True)
+                prune_positions = None
+            elif self._should_fallback(score):
+                self._safety_net_triggers += 1
+                if self._prune_verbose:
+                    print(f"[token_budget] SAFETY-NET scene={scene_token} -> skip prune", flush=True)
+                prune_positions = None
+            else:
+                prune_positions = select_prune_positions(
+                    vision_token_positions=prompt_index.vision_token_positions,
+                    score=score,
+                    keep_ratio=kr,
+                )
+                if self._prune_verbose:
+                    print(
+                        f"[token_budget] scene={scene_token} N={n} kr={kr:.3f} "
+                        f"-> prune {int(prune_positions.numel())} tokens",
+                        flush=True,
+                    )
         elif self._keep_ratio < 1.0:
             prompt_index, input_ids = self._build_prompt_index(features)
             n = prompt_index.n_vision

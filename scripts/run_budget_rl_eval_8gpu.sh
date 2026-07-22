@@ -53,12 +53,22 @@ if [[ -z "$BUDGET_CKPT" ]]; then
 fi
 log "Using budget RL ckpt: $BUDGET_CKPT"
 
+# SFT scorer (plain TokenImportanceScorer, no budget head) used for the FIXED r=0.5 baseline.
+# NOTE: we cannot reuse $BUDGET_CKPT for the 'scorer' selector because ScorerRunner.load_state_dict
+# is strict and the budget checkpoint carries extra/mismatched 'token_net.*'+'budget_net.*' keys.
+# The budget RL token_net was warm-started from this SFT scorer, so it is the faithful fixed-ratio baseline.
+SFT_CKPT=$(ls -dt $ROOT/ckpt/s3_token_scorer 2>/dev/null | head -1)
+if [[ -z "$SFT_CKPT" || ! -f "$SFT_CKPT/checkpoint.pt" ]]; then
+    log "WARN: SFT scorer ckpt not found at $ROOT/ckpt/s3_token_scorer; fixed-r baseline will fall back to BUDGET_CKPT (may error)"
+fi
+log "Using SFT scorer for fixed-r baseline: $SFT_CKPT"
+
 run_one(){
-    local gpu="$1" sel="$2" kr="$3" sh="$4" verbose="$5" tag="$6"
+    local gpu="$1" sel="$2" kr="$3" sh="$4" verbose="$5" tag="$6" sckpt="${7:-$BUDGET_CKPT}"
     local exp="MT_budget_rl_${tag}_sh${sh}"
     local csv="$OUTDIR/${exp}.csv"
     [[ -f "$csv" ]] && { log "SKIP $exp (done)"; return; }
-    log "GPU$gpu START $exp (sel=$sel kr=$kr)"
+    log "GPU$gpu START $exp (sel=$sel kr=$kr scorer=$sckpt)"
     ( cd "$NAVSIM_ROOT"; export CUDA_VISIBLE_DEVICES="$gpu"
       timeout 50000 "$PY" navsim/planning/script/run_pdm_score_cot.py \
         experiment_name="$exp" \
@@ -72,7 +82,7 @@ run_one(){
         +agent.codebook_cache_path="$AUTOVLA_ROOT/codebook_cache/agent_vocab.pkl" \
         +agent.lora_conf.use_lora=false \
         +agent.selector="$sel" \
-        +agent.scorer_ckpt="$BUDGET_CKPT" \
+        +agent.scorer_ckpt="$sckpt" \
         +agent.keep_ratio="$kr" \
         +agent.prune_variant=drop \
         +agent.prune_verbose="$verbose" \
@@ -86,10 +96,10 @@ PIDS=""
 for SH in 0 1 2 3; do
     P=$(run_one "$SH" "scorer_budget" "0.5" "$SH" "true" "dynamic"); [[ -n "$P" ]] && PIDS="$PIDS $P"
 done
-# FIXED r=0.5 comparison: GPU4-7 x shard 0-3
+# FIXED r=0.5 comparison: GPU4-7 x shard 0-3 (uses SFT scorer - faithful fixed-ratio baseline)
 for SH in 0 1 2 3; do
     GPU=$((SH+4))
-    P=$(run_one "$GPU" "scorer" "0.5" "$SH" "false" "r050"); [[ -n "$P" ]] && PIDS="$PIDS $P"
+    P=$(run_one "$GPU" "scorer" "0.5" "$SH" "false" "r050" "$SFT_CKPT"); [[ -n "$P" ]] && PIDS="$PIDS $P"
 done
 
 [[ -n "$PIDS" ]] && { log "Waiting on PIDs:$PIDS"; wait $PIDS 2>/dev/null; }

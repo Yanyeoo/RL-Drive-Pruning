@@ -57,8 +57,13 @@ def parse_args():
     p.add_argument("--output", type=str,
                    default=str(ROOT / "results/impromptu7b/pred.jsonl"))
     p.add_argument("--max-scenes", type=int, default=None)
+    p.add_argument("--skip-first", type=int, default=0,
+                   help="skip the first N resolvable samples (for sharding across GPUs)")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--device", type=str, default="cuda:0")
+    p.add_argument("--image-map", type=str, default=None,
+                   help="JSON {qa_image_ref -> on-disk png}. Samples whose images "
+                        "are not resolvable are skipped (not written as empty).")
     return p.parse_args()
 
 
@@ -71,9 +76,9 @@ def load_model(model_path: str, device: str):
 
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_path,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,  # H20 sm_90: bf16 avoids fp16 GEMM SIGFPE
         device_map=device,
-        attn_implementation="eager",  # needed for attention hooks
+        attn_implementation="sdpa",  # eager triggers extra SIGFPE on H20; sdpa+no-cache is stable
     )
     model.eval()
 
@@ -88,6 +93,26 @@ def load_scorer(scorer_ckpt: str, device: str):
     """Load our 7B token importance scorer."""
     from rldrive.scoring.token_scorer import ScorerRunner
     return ScorerRunner(scorer_ckpt, device=device)
+
+
+_IMG_MAP: Dict[str, str] = {}
+
+
+def resolve_image(img_path: str) -> Optional[str]:
+    """Resolve a QA image ref to an on-disk file.
+
+    Order: direct existing path -> exact map hit -> map hit on 'samples/...' suffix.
+    Returns None if unresolvable (caller should skip the sample).
+    """
+    import re
+    if os.path.exists(img_path):
+        return img_path
+    if img_path in _IMG_MAP:
+        return _IMG_MAP[img_path]
+    m = re.search(r"samples/.*", img_path)
+    if m and m.group(0) in _IMG_MAP:
+        return _IMG_MAP[m.group(0)]
+    return None
 
 
 def get_vision_positions(input_ids: torch.Tensor) -> torch.Tensor:
@@ -110,11 +135,12 @@ def capture_layer0_features(model, input_ids, pixel_values, image_grid_thw, devi
     """
     feat_bucket = {}
     
-    # Hook into the first decoder layer to capture inputs
-    def hook_fn(module, input, output):
-        # input[0] is hidden_states entering the layer: (bsz, seq, hidden)
+    # Hook into the first decoder layer to capture inputs.
+    # forward_pre_hook callback signature is (module, args).
+    def hook_fn(module, args):
+        # args[0] is hidden_states entering the layer: (bsz, seq, hidden)
         if "hidden_states" not in feat_bucket:
-            feat_bucket["hidden_states"] = input[0].detach()
+            feat_bucket["hidden_states"] = args[0].detach()
     
     # Register hook on first decoder layer
     handle = model.model.layers[0].register_forward_pre_hook(hook_fn)
@@ -173,18 +199,20 @@ def run_inference_with_pruning(
     
     # Build the chat text (without images inline)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    # ShareGPT content uses a literal "<image>" marker; Qwen2.5-VL expects the
+    # vision placeholder span so the processor's image features have matching tokens.
+    if images and "<image>" in text:
+        text = text.replace("<image>", "<|vision_start|><|image_pad|><|vision_end|>")
     
     # Process with images
     if images:
         from PIL import Image
         pil_images = []
         for img_path in images:
-            if os.path.exists(img_path):
-                pil_images.append(Image.open(img_path).convert("RGB"))
-            else:
-                # Try relative to data root
-                # TODO: configure image root path
-                pil_images.append(Image.open(img_path).convert("RGB"))
+            resolved = resolve_image(img_path)
+            if resolved is None:
+                raise FileNotFoundError(f"unmapped image: {img_path}")
+            pil_images.append(Image.open(resolved).convert("RGB"))
         
         inputs = processor(
             text=[text],
@@ -209,10 +237,11 @@ def run_inference_with_pruning(
             n_vision = len(vision_positions)
             n_keep = max(1, int(n_vision * keep_ratio))
             
-            # Score tokens
-            # Scorer expects: (N, emb_dim + n_cam) but for simplicity,
-            # we can use the vision features directly if scorer handles it
-            scores = scorer.score(vision_feat)  # (N_vision,)
+            # Score tokens. nuScenes uses a single CAM_FRONT image -> one vision
+            # block spanning all vision positions (cam id 0 for every token).
+            vp = vision_positions.flatten()
+            vision_blocks = [(int(vp.min()) - 1, int(vp.max()) + 1)]
+            scores = scorer.score(vision_feat, vp, vision_blocks).flatten()  # (N_vision,)
             
             # Select top-K
             _, top_indices = scores.topk(n_keep)
@@ -231,11 +260,10 @@ def run_inference_with_pruning(
     # 3. Generate
     with torch.no_grad():
         gen_kwargs = {
-            "max_new_tokens": 512,
-            "temperature": 0.01,
-            "top_p": 0.001,
-            "top_k": 1,
-            "do_sample": False,
+            "max_new_tokens": 96,   # PLANNING waypoints are short; keep it tight for speed
+            "do_sample": False,     # clean greedy
+            "temperature": None, "top_p": None, "top_k": None,
+            "use_cache": False,     # H20+torch2.4: KV-cache path triggers SIGFPE; disable
         }
         
         generate_inputs = {
@@ -262,6 +290,13 @@ def main():
     args = parse_args()
     device = args.device
     
+    # Optional image map (QA ref -> on-disk png)
+    global _IMG_MAP
+    if args.image_map:
+        with open(args.image_map) as f:
+            _IMG_MAP = json.load(f)
+        print(f"[infer] loaded image map: {len(_IMG_MAP)} entries", flush=True)
+
     # Load model + scorer
     model, processor, tokenizer = load_model(args.model_path, device)
     
@@ -282,6 +317,15 @@ def main():
         print(f"[infer] ERROR: unexpected data format in {args.data_json}", flush=True)
         sys.exit(1)
     
+    # Keep only samples whose images are all resolvable (skip rather than emit empty).
+    if _IMG_MAP:
+        before = len(samples)
+        samples = [s for s in samples
+                   if s.get("images") and all(resolve_image(im) is not None for im in s["images"])]
+        print(f"[infer] resolvable samples: {len(samples)}/{before} (skipped {before-len(samples)})", flush=True)
+
+    if args.skip_first:
+        samples = samples[args.skip_first:]
     if args.max_scenes:
         samples = samples[:args.max_scenes]
     

@@ -1,17 +1,12 @@
-"""train_scorer_budget_rl.py — Per-Token Counterfactual REINFORCE for scorer with learned budget.
+"""train_scorer_budget_rl.py — RL training for scorer with learned budget.
 
-v6: Per-token counterfactual credit assignment.
-Instead of a scene-level reward that updates ALL kept tokens equally,
-this version computes per-token advantage via counterfactual rollouts:
+The scorer simultaneously learns:
+  1. Which tokens to keep (per-token importance)  -> token_net
+  2. How many tokens to keep (scene-level budget) -> budget_net
 
-  For each scene:
-    1. Baseline forward (unpruned) → R_base (true PDMS)
-    2. Pruned forward (Top-K kept)  → R_pruned
-    3. For K=4 sampled kept tokens, counterfactual forward:
-       swap token_i out (kept→dropped), add a random dropped token → R_{-i}
-    4. Per-token advantage: A_i = R_pruned - R_{-i}
-    5. Token_net updated via: policy_loss = -Σ A_i * log_p(select token_i)
-    6. Budget_net still uses scene-level REINFORCE (Gaussian policy)
+Reward = α * shaped_driving_reward + β * efficiency_bonus
+  - shaped_driving_reward: same as train_scorer_grpo.py (sub-metric weighted delta)
+  - efficiency_bonus: (1 - keep_ratio) — encourages pruning more
 
 The budget head outputs a continuous keep_ratio per scene. REINFORCE optimizes
 one joint policy: a Gaussian policy over the continuous budget action and a
@@ -32,8 +27,7 @@ Usage:
     --scorer-ckpt ckpt/s3_token_scorer \
     --out-dir ckpt/s3_token_scorer_budget_rl \
     --num-epochs 3 --group-size 16 --lr 3e-5 --budget-lr 1e-4 \
-    --efficiency-beta 0.0 --driving-scale 3.0 \
-    --counterfactual-k 4
+    --efficiency-beta 0.15 --driving-scale 2.0
 """
 from __future__ import annotations
 
@@ -129,12 +123,6 @@ def parse_args():
                    help="Use target-centric efficiency reward: -beta*(kr - target_kr)^2")
     p.add_argument("--target-keep-ratio", type=float, default=0.355,
                    help="Target mean keep_ratio for adaptive efficiency (SFT scorer statistic)")
-    # v6: Per-token counterfactual REINFORCE
-    p.add_argument("--counterfactual-k", type=int, default=4,
-                   help="Number of kept tokens to sample for counterfactual evaluation per scene. "
-                        "0 disables counterfactual (falls back to scene-level REINFORCE).")
-    p.add_argument("--counterfactual-lr", type=float, default=1e-4,
-                   help="Separate LR for token_net under per-token counterfactual updates")
     return p.parse_args()
 
 
@@ -384,112 +372,11 @@ def process_one_scene_budget(
             "token": token,
             "N": N,
             "B": B,
-            # v6: for per-token counterfactual REINFORCE
-            "top_indices": top_indices,
-            "token_scores": token_scores,
-            "all_positions": all_positions,
         }
 
     except Exception as e:
         print(f"[budget-rl] Scene {token} error: {e}", flush=True)
         return None
-
-
-def process_one_counterfactual(
-    autovla, input_features, token, token_scores, prune_variant,
-    top_indices, all_positions, N, reward_fn, args,
-):
-    """Per-token counterfactual REINFORCE: evaluate PDMS change when one kept token is dropped.
-
-    For each sampled kept token i:
-      1. Build a prune mask where token i is dropped (kept→dropped) and one random
-         dropped token is kept (dropped→kept) — keeping B constant.
-      2. Re-run VLA forward with the modified prune mask.
-      3. Compute R_{-i} = true PDMS without token i.
-      4. Per-token advantage: A_i = R_pruned - R_{-i}
-
-    token_scores: pre-computed (N,) tensor from the original process_one_scene_budget call.
-                  Used only for log_prob computation (no extra VLA forward needed).
-
-    Returns:
-      per_token_advantages: dict {global_position_index: R_{-i}} (R_pruned subtracted in caller)
-      per_token_log_probs: dict {global_position_index: log_prob from softmax surrogate}
-      counterfactual_pdms_list: list of (kept_idx, dropped_idx, R_{-i}) for logging
-    """
-    try:
-        kept_set = set(top_indices.cpu().tolist())
-        all_set = set(range(N))
-        dropped_set = list(all_set - kept_set)
-
-        if len(dropped_set) < args.counterfactual_k:
-            return None, None, None
-
-        kept_list = list(kept_set)
-        rng = np.random.RandomState(hash(token) % (2**31))
-        if len(kept_list) > args.counterfactual_k:
-            sampled_kept = rng.choice(kept_list, args.counterfactual_k, replace=False).tolist()
-        else:
-            sampled_kept = kept_list
-        sampled_dropped = rng.choice(dropped_set, len(sampled_kept), replace=False).tolist()
-
-        per_token_advantages = {}
-        per_token_log_probs = {}
-        counterfactual_pdms_list = []
-        traj_sampling = TrajectorySampling(num_poses=10, interval_length=0.5)
-        logsumexp_all = torch.logsumexp(token_scores, dim=0)
-
-        for kept_idx, dropped_idx in zip(sampled_kept, sampled_dropped):
-            # Build modified keep_mask: swap kept_idx out, dropped_idx in
-            modified_kept = kept_set - {kept_idx} | {dropped_idx}
-            keep_mask = torch.zeros(N, dtype=torch.bool)
-            for idx in modified_kept:
-                keep_mask[idx] = True
-            prune_idx = (~keep_mask).nonzero(as_tuple=True)[0]
-            prune_positions = all_positions[prune_idx]
-
-            # Re-run VLA forward with modified prune
-            with ExitStack() as stack:
-                if prune_variant == "drop" and prune_positions.numel() > 0:
-                    stack.enter_context(patch_vision_token_drop(
-                        vlm=autovla.vlm, prune_positions=prune_positions, verbose=False,
-                    ))
-                elif prune_positions.numel() > 0:
-                    stack.enter_context(patch_vision_token_prune(
-                        vlm=autovla.vlm, prune_positions=prune_positions, verbose=False,
-                    ))
-                with torch.no_grad():
-                    poses, _ = autovla.predict(input_features)
-
-            if poses is None or len(poses) < traj_sampling.num_poses:
-                continue
-
-            cf_trajectory = Trajectory(
-                poses[:traj_sampling.num_poses, :].cpu().numpy(), traj_sampling,
-            )
-
-            r_minus_i_out = reward_fn.rl_pdm_score(
-                cf_trajectory, token,
-                use_true_pdms=True, return_components=False,
-            )
-            if r_minus_i_out is None:
-                continue
-
-            R_minus_i = args.driving_scale * r_minus_i_out
-
-            # Per-token log_prob: log p(select token_i) under softmax distribution
-            s_i = token_scores[kept_idx]
-            token_log_prob = s_i - logsumexp_all  # scalar
-
-            pos = all_positions[kept_idx].item()
-            per_token_log_probs[pos] = token_log_prob
-            per_token_advantages[pos] = R_minus_i  # temp: store R_{-i}
-            counterfactual_pdms_list.append((kept_idx, dropped_idx, R_minus_i))
-
-        return per_token_advantages, per_token_log_probs, counterfactual_pdms_list
-
-    except Exception as e:
-        print(f"[cf] Scene {token} counterfactual error: {e}", flush=True)
-        return None, None, None
 
 
 def main():
@@ -506,10 +393,10 @@ def main():
 
     if is_main:
         print("=" * 70, flush=True)
-        print("[budget-rl] v6 Per-Token Counterfactual REINFORCE", flush=True)
+        print("[budget-rl] Safe-HTPO-Lite — joint WHAT + HOW MANY policy", flush=True)
         print("=" * 70, flush=True)
         print(f"  data            = {args.json_dir}")
-        print(f"  world_size      = {world_size}")
+        print(f"  world_size      = {world_size} (synchronized gradients)")
         print(f"  efficiency_beta = {args.efficiency_beta}")
         print(f"  safety_beta     = {args.safety_beta}, margin = {args.safety_margin}")
         print(f"  driving_scale   = {args.driving_scale}")
@@ -518,7 +405,6 @@ def main():
         print(f"  selection_pg_weight = {args.selection_pg_weight}")
         print(f"  kl_beta (token) = {args.kl_beta}, budget_kl_beta = {args.budget_kl_beta}")
         print(f"  group_size      = {args.group_size}")
-        print(f"  counterfactual_k= {args.counterfactual_k}")
         print("=" * 70, flush=True)
 
     # Load AutoVLA (frozen)
@@ -657,75 +543,57 @@ def main():
                 if result is None:
                     continue
 
-                # v6: Per-token counterfactual REINFORCE
-                # Compute PDMS for pruned trajectory
+                # The full-token pass that captured features also supplies the
+                # same-scene unpruned trajectory. Score it locally so navtrain
+                # delta and safety rewards never depend on navtest artifacts.
+                baseline_out = reward_fn.rl_pdm_score(
+                    result["baseline_trajectory"], result["token"],
+                    shaped=True, baseline_scores=None, return_components=True,
+                )
+                if not isinstance(baseline_out, tuple):
+                    continue
+                _, baseline = baseline_out
+                required = {"collision", "drivable", "progress", "ttc", "comfort", "direction"}
+                if not required.issubset(baseline):
+                    continue
+
+                # Score the pruned trajectory against this exact same-scene
+                # unpruned baseline for both delta and safety terms.
                 reward_out = reward_fn.rl_pdm_score(
-                    result["trajectory"], result["token"],
-                    use_true_pdms=True, return_components=True,
+                    result["trajectory"], result["token"], shaped=True,
+                    baseline_scores=baseline, return_components=True,
                 )
                 if not isinstance(reward_out, tuple):
                     continue
                 driving_reward, sub_scores = reward_out
-                if not all(k in sub_scores for k in ["collision", "drivable", "progress", "ttc", "comfort", "direction"]):
+                if not required.issubset(sub_scores):
                     continue
-                R_pruned = args.driving_scale * driving_reward
+                driving_reward = args.driving_scale * driving_reward
 
-                # Safety penalty
-                baseline_out = reward_fn.rl_pdm_score(
-                    result["baseline_trajectory"], result["token"],
-                    use_true_pdms=True, return_components=True,
+                safety_loss = sum(
+                    weight * max(0.0, baseline[name] - sub_scores[name] - args.safety_margin)
+                    for name, weight in {"collision": 0.40, "drivable": 0.30, "ttc": 0.30}.items()
                 )
-                if isinstance(baseline_out, tuple):
-                    _, baseline = baseline_out
-                    safety_loss = sum(
-                        weight * max(0.0, baseline.get(name, 0.0) - sub_scores.get(name, 0.0) - args.safety_margin)
-                        for name, weight in {"collision": 0.40, "drivable": 0.30, "ttc": 0.30}.items()
-                    )
-                else:
-                    safety_loss = 0.0
 
-                # Scene-level reward for budget head (Gaussian policy)
-                total_reward = R_pruned - args.safety_beta * safety_loss
+                # Efficiency: adaptive (target-centric) vs original (monotonic reduction)
+                #   adaptive: reward = -beta * (kr - target_kr)^2  → penalizes deviation from target
+                #   original: reward = +beta * (1 - kr)            → always incentivizes fewer tokens
+                if args.adaptive_efficiency:
+                    efficiency_bonus = -(result["keep_ratio"] - args.target_keep_ratio) ** 2
+                else:
+                    efficiency_bonus = 1.0 - result["keep_ratio"]
+                total_reward = (
+                    driving_reward
+                    - args.safety_beta * safety_loss
+                    + args.efficiency_beta * efficiency_bonus
+                )
 
                 group_rewards.append(total_reward)
+                group_log_probs.append(result["total_log_prob"])
                 group_budget_log_probs.append(result["budget_log_prob"].detach().item())
+                group_selection_log_probs.append(result["selection_log_prob"].detach().item())
                 group_keep_ratios.append(result["keep_ratio"])
                 group_safety_losses.append(safety_loss)
-
-                # v6: Per-token counterfactual REINFORCE for token_net
-                if args.counterfactual_k > 0 and result.get("top_indices") is not None:
-                    cf_advantages, cf_log_probs, cf_pdms = process_one_counterfactual(
-                        autovla=autovla, input_features=input_features, token=token_id,
-                        token_scores=result["token_scores"],
-                        prune_variant=args.prune_variant,
-                        top_indices=result["top_indices"],
-                        all_positions=result["all_positions"],
-                        N=result["N"],
-                        reward_fn=reward_fn, args=args,
-                    )
-                    if cf_advantages is not None and cf_log_probs is not None:
-                        token_advantages = {}
-                        for pos, R_minus_i in cf_advantages.items():
-                            token_advantages[pos] = R_pruned - R_minus_i
-                        per_token_losses = []
-                        for pos, adv in token_advantages.items():
-                            if pos in cf_log_probs:
-                                per_token_losses.append(-adv * cf_log_probs[pos])
-                        if per_token_losses:
-                            per_token_pg_loss = torch.stack(per_token_losses).mean()
-                        else:
-                            per_token_pg_loss = zero_loss
-                        group_selection_log_probs.append(
-                            float(np.mean([lp.item() for lp in cf_log_probs.values()]))
-                            if cf_log_probs else 0.0
-                        )
-                    else:
-                        per_token_pg_loss = zero_loss
-                        group_selection_log_probs.append(0.0)
-                else:
-                    per_token_pg_loss = zero_loss
-                    group_log_probs.append(result["total_log_prob"])
-                    group_selection_log_probs.append(result["selection_log_prob"].detach().item())
 
             # All DDP ranks execute every optimizer step, even if a local group
             # has invalid rollouts. This prevents collective-operation deadlocks.
@@ -736,20 +604,10 @@ def main():
             if len(group_rewards) >= 2:
                 rewards_t = torch.tensor(group_rewards, device=device, dtype=torch.float32)
                 advantage = (rewards_t - rewards_t.mean()) / (rewards_t.std() + 1e-8)
-
-                # Budget policy loss: scene-level REINFORCE (Gaussian policy)
-                budget_log_probs_t = torch.tensor(group_budget_log_probs, device=device, dtype=torch.float32)
-                budget_policy_loss = -(advantage.detach() * budget_log_probs_t).mean()
-
-                # Token selection policy loss: per-token counterfactual or scene-level
-                if args.counterfactual_k > 0:
-                    token_policy_loss = per_token_pg_loss
-                else:
-                    log_probs_t = torch.stack(group_log_probs)
-                    token_policy_loss = -(advantage.detach() * log_probs_t).mean()
-
-                policy_loss = budget_policy_loss + args.selection_pg_weight * token_policy_loss
-
+                # The same normalized reward updates the continuous budget and
+                # the selected Top-B token set.
+                log_probs_t = torch.stack(group_log_probs)
+                policy_loss = -(advantage.detach() * log_probs_t).mean()
                 local_mean_reward = rewards_t.mean().item()
                 local_mean_kr = float(np.mean(group_keep_ratios))
                 local_budget_log_prob = float(np.mean(group_budget_log_probs))
@@ -873,8 +731,8 @@ def _save(model, feat_mean, feat_std, n_cam, budget_log_std, out_dir, tag, args)
         "min_keep_ratio": model.min_kr, "max_keep_ratio": model.max_kr,
     }))
     (save_dir / "manifest.json").write_text(json.dumps({
-        "spec": "budget_rl_v6_per_token_counterfactual",
-        "method": "Per-token counterfactual REINFORCE + Gaussian budget; true PDMS reward; KL on token_net only",
+        "spec": "budget_rl_v3_joint_selection_budget",
+        "method": "Joint REINFORCE over Top-K token selection and Gaussian budget; driving reward (scaled) + efficiency bonus; KL on token_net only",
         "efficiency_beta": args.efficiency_beta,
         "safety_beta": args.safety_beta,
         "safety_margin": args.safety_margin,
@@ -884,7 +742,6 @@ def _save(model, feat_mean, feat_std, n_cam, budget_log_std, out_dir, tag, args)
         "budget_kl_beta": args.budget_kl_beta,
         "min_keep_ratio": args.min_keep_ratio,
         "max_keep_ratio": args.max_keep_ratio,
-        "counterfactual_k": args.counterfactual_k,
         "train_json_dir": str(args.json_dir),
         "train_metric_cache": str(args.metric_cache),
         "tag": tag,

@@ -81,13 +81,6 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
         safety_temperature: float = 1.0,     # softmax temperature for entropy computation
         # ---- Variant B denylist (scenes where true-drop causes catastrophic failure) ----
         varB_denylist: Optional[str] = None, # path to JSON list of scene tokens to skip pruning
-        # ---- matched-compute control (Reviewer #2): override per-scene keep_ratio ----
-        # JSON dict {scene_token: keep_ratio}. Only active for selector='scorer_budget'.
-        # Token ranking still comes from the budget scorer; ONLY the per-scene budget is
-        # replaced. Feeding a *permuted* version of the model's own budgets gives an exact
-        # matched-compute control: identical ranking, identical marginal budget distribution,
-        # identical mean FLOPs — the only thing destroyed is the budget<->scene association.
-        kr_override_map: Optional[str] = None,
     ):
         # Force parent's attention capture OFF (we drive capture manually in
         # pass-1 so we control the 2-pass flow); head_mask off.
@@ -122,22 +115,6 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
         if varB_denylist and Path(varB_denylist).exists():
             import json
             self._varB_denylist = set(json.loads(Path(varB_denylist).read_text()))
-
-        # matched-compute control: per-scene keep_ratio override table
-        self._kr_override: Optional[Dict[str, float]] = None
-        if kr_override_map:
-            p = Path(kr_override_map)
-            if not p.exists():
-                raise FileNotFoundError(f"kr_override_map not found: {kr_override_map}")
-            import json
-            raw = json.loads(p.read_text())
-            self._kr_override = {str(k): float(v) for k, v in raw.items()}
-            print(f"[AutoVLAWithTokenPruneAgent] kr_override_map loaded: {kr_override_map} "
-                  f"({len(self._kr_override)} scenes, "
-                  f"mean={sum(self._kr_override.values())/max(1,len(self._kr_override)):.4f})",
-                  flush=True)
-        self._kr_override_hits = 0
-        self._kr_override_misses = 0
 
         # τ-cut config
         self._tau = tau if tau is not None else None
@@ -407,18 +384,6 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
             n = prompt_index.n_vision
             scene_token = self._extract_scene_token(scene_data)
             score, kr = self._score_budget_for(scene_token, n, features, prompt_index, input_ids)
-            # matched-compute control: replace the model's per-scene budget with a
-            # value from an external table (typically a permutation of the model's own
-            # budgets). Ranking is untouched; only the budget<->scene link changes.
-            kr_src = "model"
-            if self._kr_override is not None:
-                ov = self._kr_override.get(str(scene_token))
-                if ov is None:
-                    self._kr_override_misses += 1
-                else:
-                    kr = float(ov)
-                    kr_src = "map"
-                    self._kr_override_hits += 1
             # Variant B denylist: skip pruning for known catastrophic scenes
             if self._varB_denylist and scene_token in self._varB_denylist:
                 if self._prune_verbose:
@@ -438,7 +403,7 @@ class AutoVLAWithTokenPruneAgent(AutoVLAWithAttentionAgent):
                 if self._prune_verbose:
                     print(
                         f"[token_budget] scene={scene_token} N={n} kr={kr:.3f} "
-                        f"src={kr_src} -> prune {int(prune_positions.numel())} tokens",
+                        f"-> prune {int(prune_positions.numel())} tokens",
                         flush=True,
                     )
         elif self._keep_ratio < 1.0:

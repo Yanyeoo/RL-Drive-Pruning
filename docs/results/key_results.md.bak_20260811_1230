@@ -911,29 +911,26 @@ RL r=0.75 completed to full navtest this window (`MT_rl_shaped_r075_sh0-3`, +fb 
 
 ---
 
-## 15. Complete full-navtest results (2026-08-11 audit)
+## 15. Complete full-navtest results (2026-08-10 audit)
 
 > All arms = `prune_variant=drop` (true token removal), full 4-shard navtest.
-> No-prune ref = 0.89879 (attn_L12 r=1.0, N=11576).
-> PDMS aggregated from `results/raw/tokenprune_S3_full/`, `results/raw/tokenprune_taucut/`, and `results/raw/DEF_*`.
-> N values vary due to 2 invalid tokens and scene_filter differences across experiments.
+> No-prune ref = 0.89879 (attn_L12 r=1.0, N=11574).
+> PDMS aggregated from `results/raw/tokenprune_S3_full/` and `results/raw/tokenprune_taucut/`.
 
 ### 15.1 SFT-based pruning (LambdaRank scorer)
 
 | method | r | PDMS | Δ vs no-prune | N |
 |---|---|---|---:|---:|---|
-| SFT scorer | 1.0 (no-prune ref) | **0.898789** | — | 11576 |
-| SFT scorer | 0.75 | **0.898305** | −0.048 pt | 11576 |
-| SFT scorer | 0.50 | **0.891990** | −0.680 pt | 11576 |
-| SFT scorer | 0.25 | **0.850820** | −4.797 pt | 11576 |
-| SFT scorer | 0.10 | **0.688582** | −21.020 pt | 11576 |
+| SFT scorer | 0.75 | **0.898305** | −0.048 pt | 11572 |
+| SFT scorer | 0.50 | **0.891990** | −0.680 pt | 11571 |
+| SFT scorer | 0.25 | **0.850820** | −4.797 pt | 11573 |
 
 ### 15.2 MSE scorer ablation
 
 | method | r | PDMS | Δ vs no-prune | N |
 |---|---|---|---:|---:|---|
-| MSE scorer | 0.75 | **0.896806** | −0.198 pt | 11576 |
-| MSE scorer | 0.50 | **0.889405** | −0.938 pt | 11576 |
+| MSE scorer | 0.75 | **0.896806** | −0.198 pt | 11574 |
+| MSE scorer | 0.50 | **0.889405** | −0.938 pt | 11573 |
 
 LambdaRank vs MSE @ r=0.5: ΛRank wins by +0.258 pt. @ r=0.75: ΛRank wins by +0.150 pt.
 
@@ -941,52 +938,35 @@ LambdaRank vs MSE @ r=0.5: ΛRank wins by +0.258 pt. @ r=0.75: ΛRank wins by +0
 
 | τ-cut | mean kr | PDMS | Δ vs no-prune | N |
 |---|---|---|---:|---:|---|
-| kr040 (τ=−0.1253) | ~0.40 | **0.876233** | −2.256 pt | 11576 |
-| kr050 (τ=−0.1487) | ~0.50 | **0.886782** | −1.201 pt | 11576 |
-| kr060 (τ=−0.1668) | ~0.60 | **0.893951** | −0.484 pt | 11576 |
-| kr070 (τ=−0.1840) | ~0.70 | **0.896011** | −0.278 pt | 11576 |
+| kr040 (τ=−0.1253) | ~0.40 | **0.876233** | −2.256 pt | 11575 |
+| kr050 (τ=−0.1487) | ~0.50 | **0.886782** | −1.201 pt | 11574 |
+| kr060 (τ=−0.1668) | ~0.60 | **0.893951** | −0.484 pt | 11575 |
+| kr070 (τ=−0.1840) | ~0.70 | **0.896011** | −0.278 pt | 11574 |
 
 Adaptive Pareto: kr040→kr070 spans PDMS 0.876→0.896, complete 4-point curve.
 
-### 15.4 Baseline methods (full 4-shard)
+### 15.4 Baseline methods
 
 | method | r | PDMS | Δ vs no-prune | N |
 |---|---|---|---:|---:|---|
-| attn_L12 (teacher) | 0.50 | **0.890060** | −0.873 pt | 11576 |
-| attn_L12 (teacher) | 1.0 (no-prune) | **0.898789** | — | 11576 |
-| random | 0.50 | **0.863486** | −3.530 pt | 11576 |
-| FastV L2 | 0.75 | **0.882258** | −1.653 pt | 11576 |
-| FastV L2 | 0.50 | **0.832961** | −6.583 pt | 11576 |
-| Variant B safe (scorer) | 0.50 | **0.872533** | −2.626 pt | 11576 |
-| Variant B safe (scorer) | 0.75 | **0.881638** | −1.715 pt | 11576 |
-| **SparseVLM text** | 0.75 | **0.899084** | **+0.030 pt** ✅ | 11576 |
-| **SparseVLM text** | 0.50 | **0.872458** | −2.633 pt | 11576 |
-| **PruMerge CLS** | 0.50 | **0.788538** | −11.025 pt | 11576 |
+| attn_L12 (teacher) | 0.50 | **0.890060** | −0.873 pt | 11573 |
+| random | 0.50 | **0.863486** | −3.530 pt | 11575 |
+| FastV L2 | 0.75 | **0.882258** | −1.653 pt | 11575 |
+| FastV L2 | 0.50 | **0.832961** | −6.583 pt | 11573 |
+| Variant B safe | 0.50 | **0.872533** | −2.626 pt | 11576 |
 
-### 15.5 Matched-compute baselines
+### 15.5 RL training results (degradation trajectory)
 
-| method | r | PDMS | Δ vs SFT r=0.5 | N |
-|---|---|---|---:|---:|---|
-| SFT scorer r=0.5 (baseline) | 0.50 | **0.891990** | — | 11576 |
-| SFT scorer r=0.355 (matched FLOPs) | 0.355 | **0.855749** | −3.624 pt | 11576 |
-| Budget RL dynamic (raw, no fallback) | adaptive | **0.848654** | −4.334 pt | 11576 |
+| method | PDMS | Δ vs SFT r=0.5 | N |
+|---|---|---:|---:|---|
+| SFT scorer r=0.5 (baseline) | **0.891990** | — | 11571 |
+| v3 Budget RL (proxy reward, eff_beta=0.15) | **0.87066** | −2.133 pt | shard0 only |
+| v4 Budget RL (proxy reward, eff_beta=0.05) | **0.860939** | −3.105 pt | 11576 |
+| v5 True PDMS RL (2 epochs) | **0.848498** | −4.349 pt | 11576 |
 
-### 15.6 RL training results (degradation trajectory)
+**Key finding**: All RL variants degrade from SFT baseline. Scene-level REINFORCE + Gaussian budget fails to improve PDMS. Per-token counterfactual (v6) pending evaluation.
 
-| method | PDMS | Δ vs SFT r=0.5 | N | note |
-|---|---|---:|---:|---|---|
-| SFT scorer r=0.5 (baseline) | **0.891990** | — | 11576 | |
-| RL shaped reward r=0.5 | **0.890938** | −0.105 pt | 11576 | best RL variant, near SFT |
-| RL shaped reward r=0.75 | **0.882082** | −0.991 pt | 11576 | |
-| RL shaped reward r=0.25 | **0.811271** | −8.072 pt | 11576 | |
-| v3 Budget RL (proxy, eff_beta=0.15) | **0.87066** | −2.133 pt | shard0 only | |
-| v4 Budget RL (proxy, eff_beta=0.05) | **0.860939** | −3.105 pt | 11576 | |
-| v5 True PDMS RL (2 epochs) | **0.848498** | −4.349 pt | 11576 | |
-| v6 Per-token Counterfactual (50 steps) | **0.878672** | −1.332 pt | shard0 only | grad≈0, no learning signal |
-
-**Key finding**: All RL variants degrade from SFT baseline. Scene-level REINFORCE + Gaussian budget fails. v6 per-token counterfactual also fails (grad≈0). RL shaped reward r=0.5 is closest to SFT (−0.105 pt).
-
-### 15.7 Block A — Multi-seed Budget RL (shard0 only, 2026-08-03)
+### 15.6 Block A — Multi-seed Budget RL (shard0 only, 2026-08-03)
 
 | seed | PDMS | N |
 |---:|---:|---|
@@ -1002,15 +982,4 @@ Adaptive Pareto: kr040→kr070 spans PDMS 0.876→0.896, complete 4-point curve.
 
 95% CI: 0.86106 ± 0.01561. Best seed (s3=0.87636) still below SFT (0.89199).
 
-### 15.8 Key takeaways for ICLR 2027
-
-- **Strongest SFT result**: SparseVLM r=0.75 @ 0.89908 > no-prune 0.89879 (statistically tied, within noise)
-- **Best learned method**: SFT scorer r=0.75 @ 0.89830 (ΛRank), r=0.5 @ 0.89199
-- **RL ceiling**: RL shaped reward r=0.5 @ 0.89094 (best RL, but −0.105 pt vs SFT)
-- **Adaptive budget**: τ-cut kr060 @ 0.89395, kr070 @ 0.89601 — competitive
-- **Matched-compute**: SFT r=0.355 (0.85575) vs Budget RL dynamic (0.84865) → SFT wins by +0.710 pt
-- **Gap to close**: No method exceeds no-prune (0.89879) by a meaningful margin; SparseVLM r=0.75 is only +0.030 pt
-
-- Changelog:
-  - 2026-08-10 added §15 (complete full-navtest audit with all existing data).
-  - 2026-08-11 added v6 results, SparseVLM/PruMerge full, RL shaped reward, r=0.1, SparseVLM r=0.75, §15.5 matched-compute, §15.8 ICLR takeaways.
+- Changelog: 2026-08-10 added §15 (complete full-navtest audit with all existing data).

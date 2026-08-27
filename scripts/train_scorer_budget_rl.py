@@ -100,6 +100,8 @@ def parse_args():
                    help="Weight for efficiency bonus (1 - keep_ratio) in reward")
     p.add_argument("--driving-scale", type=float, default=1.0,
                    help="Scale factor on the driving reward (stronger policy signal)")
+    p.add_argument("--delta-reward", action="store_true",
+                   help="Use same-scene (pruned PDMS - no-prune PDMS) to remove scene-difficulty variance")
     p.add_argument("--min-keep-ratio", type=float, default=0.2)
     p.add_argument("--max-keep-ratio", type=float, default=0.9)
     p.add_argument("--budget-log-std-init", type=float, default=-1.0,
@@ -129,13 +131,68 @@ def parse_args():
                    help="Use target-centric efficiency reward: -beta*(kr - target_kr)^2")
     p.add_argument("--target-keep-ratio", type=float, default=0.355,
                    help="Target mean keep_ratio for adaptive efficiency (SFT scorer statistic)")
+    # v10: PPO-style value baseline + efficiency floor + budget init anchor.
+    p.add_argument("--use-value-baseline", action="store_true",
+                   help="Add a learned value head (critic); advantage = reward - V(s) "
+                        "instead of group-normalized REINFORCE (much lower variance).")
+    p.add_argument("--value-lr", type=float, default=1e-4,
+                   help="LR for the value head (only used with --use-value-baseline)")
+    p.add_argument("--value-loss-weight", type=float, default=1.0,
+                   help="Weight of the MSE value loss in the total objective")
+    p.add_argument("--efficiency-mode", type=str, default="linear",
+                   choices=["linear", "floor"],
+                   help="linear: reward += beta*(1-kr) (pushes pruning). "
+                        "floor: reward -= beta*max(0, target_kr - kr) (only penalize pruning "
+                        "below target; keep_ratio is free to rise toward max_kr).")
+    p.add_argument("--budget-init-kr", type=float, default=None,
+                   help="Anchor the budget head's initial keep_ratio (sigmoid bias). "
+                        "None = default midpoint sigmoid(0).")
     # v6: Per-token counterfactual REINFORCE
     p.add_argument("--counterfactual-k", type=int, default=4,
                    help="Number of kept tokens to sample for counterfactual evaluation per scene. "
                         "0 disables counterfactual (falls back to scene-level REINFORCE).")
     p.add_argument("--counterfactual-lr", type=float, default=1e-4,
                    help="Separate LR for token_net under per-token counterfactual updates")
+    # v7: Differentiable Top-K selection surrogate (replaces the unbounded softmax
+    # surrogate whose logsumexp term made token scores drift/explode in scale).
+    p.add_argument("--selection-mode", type=str, default="softmax",
+                   choices=["softmax", "st_topk", "gumbel"],
+                   help="Token-selection log-prob surrogate: "
+                        "softmax = original multi-label softmax (baseline, unbounded); "
+                        "st_topk = straight-through top-K with per-token sigmoid (bounded); "
+                        "gumbel = gumbel-sigmoid soft keep-mask (bounded, noisy).")
+    p.add_argument("--selection-tau", type=float, default=1.0,
+                   help="Temperature for the gumbel-sigmoid soft keep-mask (st_topk is tau-free).")
+    # v11: hard-example mining.
+    # The v10 diagnosis showed 90 catastrophic scenes (pruned PDMS collapses while
+    # no-prune succeeds) carry 87.6% of the total negative delta. Training on a
+    # scene distribution enriched with those scenes is the remaining lever to move
+    # from "matching" no-prune to beating it.
+    p.add_argument("--scene-list", type=str, default=None,
+                   help="Path to a text file of scene tokens (one per line) to train on, "
+                        "replacing the directory glob. Duplicate lines act as oversampling "
+                        "weights. Lines starting with '#' are ignored.")
+    p.add_argument("--mine-mode", action="store_true",
+                   help="Diagnostic rollout only: for every scene compute the pruned vs "
+                        "no-prune PDMS under the CURRENT (deterministic) policy and append "
+                        "one JSON record per scene to --mine-out. No gradients, no training.")
+    p.add_argument("--mine-out", type=str, default=None,
+                   help="Output .jsonl path for --mine-mode (default <out-dir>/mine_shard<id>.jsonl)")
+    p.add_argument("--init-budget-ckpt", type=str, default=None,
+                   help="Warm-start from an already-trained TokenScorerWithBudget checkpoint "
+                        "(token_net + budget_net + value_net) instead of the SFT scorer. "
+                        "Required for mining and for continuing v10 -> v11.")
     return p.parse_args()
+
+
+def load_scene_list(path):
+    """Read scene tokens (one per line, '#' comments, duplicates = oversampling)."""
+    tokens = []
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            tokens.append(line)
+    return tokens
 
 
 def init_distributed(args):
@@ -217,7 +274,7 @@ def load_autovla_for_inference(config_path, ckpt_path, sensor_data_path, device)
     return autovla, config
 
 
-def load_budget_scorer(ckpt_dir, device, min_kr, max_kr):
+def load_budget_scorer(ckpt_dir, device, min_kr, max_kr, use_value=False):
     """Load base SFT scorer and upgrade to budget version."""
     ckpt_dir = Path(ckpt_dir)
     cfg = json.loads((ckpt_dir / "config.json").read_text())
@@ -232,7 +289,7 @@ def load_budget_scorer(ckpt_dir, device, min_kr, max_kr):
 
     model = TokenScorerWithBudget.from_pretrained_scorer(
         base, hidden=int(cfg["hidden"]),
-        min_keep_ratio=min_kr, max_keep_ratio=max_kr,
+        min_keep_ratio=min_kr, max_keep_ratio=max_kr, use_value=use_value,
     )
     model.to(device)
 
@@ -243,16 +300,16 @@ def load_budget_scorer(ckpt_dir, device, min_kr, max_kr):
     return model, feat_mean, feat_std, n_cam
 
 
-def load_budget_scorer_resume(ckpt_dir, device, min_kr, max_kr):
+def load_budget_scorer_resume(ckpt_dir, device, min_kr, max_kr, use_value=False):
     """Load a previously-saved budget ckpt (token_net + budget_net)."""
     ckpt_dir = Path(ckpt_dir)
     cfg = json.loads((ckpt_dir / "config.json").read_text())
     model = TokenScorerWithBudget(
         emb_dim=int(cfg["emb_dim"]), n_cam=int(cfg["n_cam"]), hidden=int(cfg["hidden"]),
-        min_keep_ratio=min_kr, max_keep_ratio=max_kr,
+        min_keep_ratio=min_kr, max_keep_ratio=max_kr, use_value=use_value,
     )
     sd = torch.load(ckpt_dir / "checkpoint.pt", map_location=device, weights_only=False)
-    model.load_state_dict(sd)
+    model.load_state_dict(sd, strict=False)
     model.to(device)
     norm = torch.load(ckpt_dir / "feature_norm.pt", map_location=device, weights_only=False)
     feat_mean = norm["mean"].to(device)
@@ -261,11 +318,74 @@ def load_budget_scorer_resume(ckpt_dir, device, min_kr, max_kr):
     return model, feat_mean, feat_std, n_cam
 
 
+def compute_selection_log_prob(token_scores, B, mode, tau):
+    """Differentiable Top-K selection surrogate (bounded, ranking-preserving).
+
+    Replaces the unbounded multi-label softmax surrogate
+        selection_log_prob = (sum(top scores) - B * logsumexp(scores)) / B
+    whose logsumexp term lets token scores drift/explode in scale and destroy
+    the SFT ranking (logp was observed drifting from -10 to -63).
+
+    All three modes return the SAME hard Top-K indices (stop-gradient) used to
+    build the actual prune mask, so forward behaviour is identical; only the
+    score-function gradient differs:
+
+      softmax — original multi-label softmax log-prob (baseline, unbounded).
+      st_topk — straight-through Top-K: forward uses the hard keep mask, backward
+                flows through a per-token sigmoid around the Top-K threshold. The
+                resulting per-token log-prob gradient is bounded in [-1/tau, 1/tau].
+      gumbel  — gumbel-sigmoid soft keep-mask: same straight-through structure as
+                st_topk but with Gumbel exploration noise in the soft mask.
+
+    Returns:
+      log_prob:          scalar, differentiable scene-level selection log-probability
+      top_indices:       (B,) hard Top-K indices (stop-gradient)
+      per_token_log_prob: (N,) bounded per-token log-prob, for counterfactual use
+    """
+    N = token_scores.numel()
+    B = max(1, min(B, N))
+    eps = 1e-7
+
+    _, top_indices = token_scores.topk(B, dim=0)
+
+    if mode == "softmax":
+        logsumexp = torch.logsumexp(token_scores, dim=0)
+        log_prob = (token_scores[top_indices].sum() - B * logsumexp) / B
+        per_token = token_scores - logsumexp
+        return log_prob, top_indices, per_token
+
+    # Decision boundary = B-th largest score (stop-gradient).
+    kth = token_scores.topk(B, dim=0).values[-1].detach()
+    hard = torch.zeros(N, device=token_scores.device, dtype=token_scores.dtype)
+    hard[top_indices] = 1.0
+    hard = hard.detach()  # straight-through: forward uses the hard keep mask
+
+    if mode == "st_topk":
+        p = torch.sigmoid((token_scores - kth) / tau)
+    elif mode == "gumbel":
+        g1 = -torch.log(-torch.log(torch.rand_like(token_scores) + eps) + eps)
+        g2 = -torch.log(-torch.log(torch.rand_like(token_scores) + eps) + eps)
+        p = torch.sigmoid((token_scores - kth + g1 - g2) / tau)
+    else:
+        raise ValueError(f"unknown selection mode: {mode}")
+
+    # Bounded per-token log-prob under the soft keep probability p.
+    per_token = hard * torch.log(p + eps) + (1.0 - hard) * torch.log(1.0 - p + eps)
+    log_prob = per_token.mean()
+    return log_prob, top_indices, per_token
+
+
 def process_one_scene_budget(
     autovla, input_features, token, scorer_model, feat_mean, feat_std, n_cam,
     prune_variant, device, budget_log_std, selection_pg_weight,
+    selection_mode="softmax", selection_tau=1.0, deterministic=False,
 ):
-    """Run a two-pass rollout with joint budget and token-selection policy terms."""
+    """Run a two-pass rollout with joint budget and token-selection policy terms.
+
+    deterministic=True uses the budget policy MEAN (no Gaussian sample), i.e. the
+    exact keep_ratio the eval path (`BudgetScorerRunner`) would use. Used by
+    --mine-mode so mined per-scene deltas reflect deployed behaviour.
+    """
     try:
         inputs = autovla.get_prompt(input_features)
         input_ids = inputs["input_ids"]
@@ -318,12 +438,12 @@ def process_one_scene_budget(
         coh = cam_onehot(cam, n_cam).to(device)
         x = torch.cat([emb, coh], dim=-1)
 
-        token_scores, keep_ratio, budget_logit = scorer_model(x)
+        token_scores, keep_ratio, budget_logit, value = scorer_model(x)
 
         # === Sample budget (Gaussian policy in logit space) ===
         budget_std = torch.exp(budget_log_std)
         budget_dist = torch.distributions.Normal(budget_logit, budget_std)
-        sampled_logit = budget_dist.sample()
+        sampled_logit = budget_logit.detach() if deterministic else budget_dist.sample()
         budget_log_prob = budget_dist.log_prob(sampled_logit)
 
         # Map sampled logit to keep_ratio via sigmoid
@@ -334,13 +454,11 @@ def process_one_scene_budget(
 
         # === Select top-B by token scores ===
         # Treat the selected set as the token-selection action.  The Top-K
-        # indices are stop-gradient action samples; the multi-label softmax
-        # surrogate supplies the REINFORCE score-function gradient to token_net.
-        _, top_indices = token_scores.topk(B, dim=0)
-        selection_log_prob = (
-            token_scores[top_indices].sum()
-            - B * torch.logsumexp(token_scores, dim=0)
-        ) / B
+        # indices are stop-gradient action samples; the differentiable Top-K
+        # surrogate (softmax / straight-through / gumbel) supplies the REINFORCE
+        # score-function gradient to token_net.
+        selection_log_prob, top_indices, per_token_log_prob = compute_selection_log_prob(
+            token_scores, B, selection_mode, selection_tau)
 
         # One driving reward now updates both policy factors: which tokens to
         # retain and how many tokens to retain for this scene.
@@ -388,6 +506,10 @@ def process_one_scene_budget(
             "top_indices": top_indices,
             "token_scores": token_scores,
             "all_positions": all_positions,
+            # v7: bounded per-token selection log-prob (surrogate-aware)
+            "per_token_log_prob": per_token_log_prob,
+            # v10: value-head (critic) estimate V(s) for the value-baseline variant
+            "value": value,
         }
 
     except Exception as e:
@@ -396,7 +518,7 @@ def process_one_scene_budget(
 
 
 def process_one_counterfactual(
-    autovla, input_features, token, token_scores, prune_variant,
+    autovla, input_features, token, per_token_log_prob, prune_variant,
     top_indices, all_positions, N, reward_fn, args,
 ):
     """Per-token counterfactual REINFORCE: evaluate PDMS change when one kept token is dropped.
@@ -408,12 +530,13 @@ def process_one_counterfactual(
       3. Compute R_{-i} = true PDMS without token i.
       4. Per-token advantage: A_i = R_pruned - R_{-i}
 
-    token_scores: pre-computed (N,) tensor from the original process_one_scene_budget call.
-                  Used only for log_prob computation (no extra VLA forward needed).
+    per_token_log_prob: pre-computed (N,) bounded per-token selection log-prob from
+                        process_one_scene_budget (surrogate-aware). Used only for the
+                        score-function term (no extra VLA forward needed).
 
     Returns:
       per_token_advantages: dict {global_position_index: R_{-i}} (R_pruned subtracted in caller)
-      per_token_log_probs: dict {global_position_index: log_prob from softmax surrogate}
+      per_token_log_probs: dict {global_position_index: log_prob from selection surrogate}
       counterfactual_pdms_list: list of (kept_idx, dropped_idx, R_{-i}) for logging
     """
     try:
@@ -436,7 +559,6 @@ def process_one_counterfactual(
         per_token_log_probs = {}
         counterfactual_pdms_list = []
         traj_sampling = TrajectorySampling(num_poses=10, interval_length=0.5)
-        logsumexp_all = torch.logsumexp(token_scores, dim=0)
 
         for kept_idx, dropped_idx in zip(sampled_kept, sampled_dropped):
             # Build modified keep_mask: swap kept_idx out, dropped_idx in
@@ -476,9 +598,8 @@ def process_one_counterfactual(
 
             R_minus_i = args.driving_scale * r_minus_i_out
 
-            # Per-token log_prob: log p(select token_i) under softmax distribution
-            s_i = token_scores[kept_idx]
-            token_log_prob = s_i - logsumexp_all  # scalar
+            # Per-token log_prob: bounded selection surrogate (surrogate-aware)
+            token_log_prob = per_token_log_prob[kept_idx]  # scalar
 
             pos = all_positions[kept_idx].item()
             per_token_log_probs[pos] = token_log_prob
@@ -513,12 +634,14 @@ def main():
         print(f"  efficiency_beta = {args.efficiency_beta}")
         print(f"  safety_beta     = {args.safety_beta}, margin = {args.safety_margin}")
         print(f"  driving_scale   = {args.driving_scale}")
+        print(f"  delta_reward    = {args.delta_reward}")
         print(f"  keep_ratio range= [{args.min_keep_ratio}, {args.max_keep_ratio}]")
         print(f"  lr (token/budget)= {args.lr} / {args.budget_lr}")
         print(f"  selection_pg_weight = {args.selection_pg_weight}")
         print(f"  kl_beta (token) = {args.kl_beta}, budget_kl_beta = {args.budget_kl_beta}")
         print(f"  group_size      = {args.group_size}")
         print(f"  counterfactual_k= {args.counterfactual_k}")
+        print(f"  selection_mode  = {args.selection_mode} (tau={args.selection_tau})")
         print("=" * 70, flush=True)
 
     # Load AutoVLA (frozen)
@@ -533,7 +656,8 @@ def main():
     resume_state = None
     if resume_dir.exists() and (resume_dir / "checkpoint.pt").exists():
         scorer_model, feat_mean, feat_std, n_cam = load_budget_scorer_resume(
-            resume_dir, device, args.min_keep_ratio, args.max_keep_ratio)
+            resume_dir, device, args.min_keep_ratio, args.max_keep_ratio,
+            use_value=args.use_value_baseline)
         bsd = torch.load(resume_dir / "budget_params.pt", map_location=device, weights_only=False)
         budget_log_std = nn.Parameter(torch.tensor(bsd["budget_log_std"], device=device))
         resume_state = json.loads((resume_dir / "resume_state.json").read_text())
@@ -542,10 +666,29 @@ def main():
         print(f"[budget-rl] RESUME from {resume_dir} at step {global_step} "
               f"(epoch {resume_state['epoch']}, next g_start {resume_state['g_start']})", flush=True)
     else:
-        scorer_model, feat_mean, feat_std, n_cam = load_budget_scorer(
-            args.scorer_ckpt, device, args.min_keep_ratio, args.max_keep_ratio)
-        budget_log_std = nn.Parameter(torch.tensor(args.budget_log_std_init, device=device))
-        print(f"[budget-rl] Init from SFT scorer: {args.scorer_ckpt}", flush=True)
+        if args.init_budget_ckpt:
+            # v11: continue from a trained budget policy (v10 full_hi) instead of
+            # restarting from the SFT scorer, so hard-example mining refines the
+            # already-SOTA-matching policy rather than relearning it.
+            scorer_model, feat_mean, feat_std, n_cam = load_budget_scorer_resume(
+                Path(args.init_budget_ckpt), device, args.min_keep_ratio, args.max_keep_ratio,
+                use_value=args.use_value_baseline)
+            bp = Path(args.init_budget_ckpt) / "budget_params.pt"
+            init_log_std = args.budget_log_std_init
+            if bp.exists():
+                init_log_std = torch.load(bp, map_location=device, weights_only=False)["budget_log_std"]
+            budget_log_std = nn.Parameter(torch.tensor(float(init_log_std), device=device))
+            print(f"[budget-rl] WARM-START from budget ckpt: {args.init_budget_ckpt} "
+                  f"(budget_log_std={float(init_log_std):.4f})", flush=True)
+        else:
+            scorer_model, feat_mean, feat_std, n_cam = load_budget_scorer(
+                args.scorer_ckpt, device, args.min_keep_ratio, args.max_keep_ratio,
+                use_value=args.use_value_baseline)
+            budget_log_std = nn.Parameter(torch.tensor(args.budget_log_std_init, device=device))
+            if args.budget_init_kr is not None:
+                scorer_model.set_budget_init(args.budget_init_kr)
+                print(f"[budget-rl] Budget head anchored at keep_ratio={args.budget_init_kr}", flush=True)
+            print(f"[budget-rl] Init from SFT scorer: {args.scorer_ckpt}", flush=True)
     scorer_model.train()
 
     # Reference scorer (frozen, for KL) — anchored at current params so token_net stays stable
@@ -578,7 +721,18 @@ def main():
 
     # Scene list
     json_dir = Path(args.json_dir)
-    all_scenes = sorted(json_dir.glob("*.json"))
+    if args.scene_list:
+        # Explicit scene subset (v11 hard-example mining). Duplicate lines are
+        # preserved so a token can appear multiple times = oversampling weight.
+        wanted = load_scene_list(args.scene_list)
+        all_scenes = [json_dir / f"{tok}.json" for tok in wanted]
+        missing = [p for p in all_scenes if not p.exists()]
+        all_scenes = [p for p in all_scenes if p.exists()]
+        if is_main:
+            print(f"[budget-rl] scene-list {args.scene_list}: {len(all_scenes)} scenes "
+                  f"({len(missing)} missing json)", flush=True)
+    else:
+        all_scenes = sorted(json_dir.glob("*.json"))
     if args.max_scenes:
         all_scenes = all_scenes[:args.max_scenes]
     valid_scenes = [s for s in all_scenes if s.stem in cache_tokens]
@@ -601,12 +755,96 @@ def main():
     else:
         print(f"[budget-rl] {len(valid_scenes)} scenes", flush=True)
 
-    # Optimizer: separate LR for token_net vs budget head + log_std
-    optimizer = torch.optim.AdamW([
+    # === v11: mining mode — diagnostic rollout only, no gradients ===
+    if args.mine_mode:
+        scorer_model.eval()
+        mine_out = Path(args.mine_out) if args.mine_out else (
+            out_dir / f"mine_shard{args.shard_id}.jsonl")
+        mine_out.parent.mkdir(parents=True, exist_ok=True)
+        # Resume-safe: skip scenes already recorded in a previous (reclaimed) run.
+        done = set()
+        if mine_out.exists():
+            for line in mine_out.read_text().splitlines():
+                try:
+                    done.add(json.loads(line)["token"])
+                except Exception:
+                    pass
+        print(f"[mine] {len(valid_scenes)} scenes, {len(done)} already done -> {mine_out}", flush=True)
+        t_mine = time.time()
+        n_written = 0
+        with mine_out.open("a") as mf:
+            for i, scene_path in enumerate(valid_scenes):
+                if scene_path.stem in done:
+                    continue
+                try:
+                    with open(scene_path) as f:
+                        scene_data = json.load(f)
+                    input_features = {}
+                    for builder in feat_agent.get_feature_builders():
+                        input_features.update(builder.compute_features(scene_data))
+                    input_features["sensor_data_path"] = args.sensor_data_path
+                    token_id = scene_data["token"]
+                except Exception:
+                    continue
+
+                with torch.no_grad():
+                    result = process_one_scene_budget(
+                        autovla=autovla, input_features=input_features, token=token_id,
+                        scorer_model=scorer_model, feat_mean=feat_mean, feat_std=feat_std,
+                        n_cam=n_cam, prune_variant=args.prune_variant, device=device,
+                        budget_log_std=budget_log_std,
+                        selection_pg_weight=args.selection_pg_weight,
+                        selection_mode=args.selection_mode,
+                        selection_tau=args.selection_tau,
+                        deterministic=True,
+                    )
+                if result is None:
+                    continue
+
+                pruned_out = reward_fn.rl_pdm_score(
+                    result["trajectory"], result["token"],
+                    use_true_pdms=True, return_components=True)
+                base_out = reward_fn.rl_pdm_score(
+                    result["baseline_trajectory"], result["token"],
+                    use_true_pdms=True, return_components=True)
+                if not isinstance(pruned_out, tuple) or not isinstance(base_out, tuple):
+                    continue
+                pruned_pdms, pruned_sub = pruned_out
+                base_pdms, base_sub = base_out
+
+                rec = {
+                    "token": result["token"],
+                    "pruned_pdms": float(pruned_pdms),
+                    "noprune_pdms": float(base_pdms),
+                    "delta": float(pruned_pdms) - float(base_pdms),
+                    "keep_ratio": result["keep_ratio"],
+                    "N": result["N"], "B": result["B"],
+                    "pruned_sub": {k: float(v) for k, v in pruned_sub.items()},
+                    "noprune_sub": {k: float(v) for k, v in base_sub.items()},
+                }
+                mf.write(json.dumps(rec) + "\n")
+                mf.flush()
+                n_written += 1
+                if n_written % 25 == 0:
+                    rate = (time.time() - t_mine) / max(1, n_written)
+                    print(f"[mine] {n_written} written ({i+1}/{len(valid_scenes)} seen) "
+                          f"{rate:.2f}s/scene", flush=True)
+        print(f"[mine] DONE {n_written} scenes -> {mine_out} "
+              f"(wall {time.time()-t_mine:.0f}s)", flush=True)
+        if distributed:
+            dist.barrier()
+            dist.destroy_process_group()
+        return
+
+    # Optimizer: separate LR for token_net vs budget head + log_std (+ value head)
+    optimizer_groups = [
         {"params": scorer_model.token_net.parameters(), "lr": args.lr},
         {"params": scorer_model.budget_net.parameters(), "lr": args.budget_lr},
         {"params": [budget_log_std], "lr": args.budget_lr},
-    ], weight_decay=1e-4)
+    ]
+    if args.use_value_baseline and scorer_model.value_net is not None:
+        optimizer_groups.append({"params": scorer_model.value_net.parameters(), "lr": args.value_lr})
+    optimizer = torch.optim.AdamW(optimizer_groups, weight_decay=1e-4)
 
     # Training loop. Only rank 0 writes shared logs/checkpoints.
     log_file = out_dir / "train_log.jsonl"
@@ -630,9 +868,14 @@ def main():
             group_rewards = []
             group_log_probs = []
             group_budget_log_probs = []
+            group_token_pg_losses = []
             group_selection_log_probs = []
             group_keep_ratios = []
             group_safety_losses = []
+            group_values = []
+            zero_loss = budget_log_std * 0.0
+            for parameter in scorer_model.parameters():
+                zero_loss = zero_loss + parameter.sum() * 0.0
 
             for idx in perm[g_start:g_start + args.group_size]:
                 scene_path = valid_scenes[idx]
@@ -653,6 +896,8 @@ def main():
                     n_cam=n_cam, prune_variant=args.prune_variant, device=device,
                     budget_log_std=budget_log_std,
                     selection_pg_weight=args.selection_pg_weight,
+                    selection_mode=args.selection_mode,
+                    selection_tau=args.selection_tau,
                 )
                 if result is None:
                     continue
@@ -670,13 +915,15 @@ def main():
                     continue
                 R_pruned = args.driving_scale * driving_reward
 
-                # Safety penalty
+                # Safety penalty and optional same-scene delta reward.
                 baseline_out = reward_fn.rl_pdm_score(
                     result["baseline_trajectory"], result["token"],
                     use_true_pdms=True, return_components=True,
                 )
+                baseline_reward = 0.0
                 if isinstance(baseline_out, tuple):
-                    _, baseline = baseline_out
+                    baseline_reward_raw, baseline = baseline_out
+                    baseline_reward = args.driving_scale * baseline_reward_raw
                     safety_loss = sum(
                         weight * max(0.0, baseline.get(name, 0.0) - sub_scores.get(name, 0.0) - args.safety_margin)
                         for name, weight in {"collision": 0.40, "drivable": 0.30, "ttc": 0.30}.items()
@@ -684,19 +931,29 @@ def main():
                 else:
                     safety_loss = 0.0
 
-                # Scene-level reward for budget head (Gaussian policy)
-                total_reward = R_pruned - args.safety_beta * safety_loss
+                # Scene-level reward for budget head (Gaussian policy).
+                driving_term = R_pruned - baseline_reward if args.delta_reward else R_pruned
+                if args.efficiency_mode == "floor":
+                    # Only penalize pruning below the target; keep_ratio is free to
+                    # rise toward max_kr to chase the driving delta (SOTA objective).
+                    shortfall = max(0.0, args.target_keep_ratio - result["keep_ratio"])
+                    efficiency_bonus = -args.efficiency_beta * shortfall
+                else:
+                    efficiency_bonus = args.efficiency_beta * (1.0 - result["keep_ratio"])
+                total_reward = driving_term + efficiency_bonus - args.safety_beta * safety_loss
 
                 group_rewards.append(total_reward)
-                group_budget_log_probs.append(result["budget_log_prob"].detach().item())
+                group_budget_log_probs.append(result["budget_log_prob"])
                 group_keep_ratios.append(result["keep_ratio"])
                 group_safety_losses.append(safety_loss)
+                if args.use_value_baseline and result.get("value") is not None:
+                    group_values.append(result["value"].squeeze(-1))
 
                 # v6: Per-token counterfactual REINFORCE for token_net
                 if args.counterfactual_k > 0 and result.get("top_indices") is not None:
                     cf_advantages, cf_log_probs, cf_pdms = process_one_counterfactual(
                         autovla=autovla, input_features=input_features, token=token_id,
-                        token_scores=result["token_scores"],
+                        per_token_log_prob=result["per_token_log_prob"],
                         prune_variant=args.prune_variant,
                         top_indices=result["top_indices"],
                         all_positions=result["all_positions"],
@@ -724,26 +981,33 @@ def main():
                         group_selection_log_probs.append(0.0)
                 else:
                     per_token_pg_loss = zero_loss
-                    group_log_probs.append(result["total_log_prob"])
+                    group_log_probs.append(result["selection_log_prob"])
                     group_selection_log_probs.append(result["selection_log_prob"].detach().item())
+                group_token_pg_losses.append(per_token_pg_loss)
 
             # All DDP ranks execute every optimizer step, even if a local group
             # has invalid rollouts. This prevents collective-operation deadlocks.
-            zero_loss = budget_log_std * 0.0
-            for parameter in scorer_model.parameters():
-                zero_loss = zero_loss + parameter.sum() * 0.0
-
             if len(group_rewards) >= 2:
                 rewards_t = torch.tensor(group_rewards, device=device, dtype=torch.float32)
-                advantage = (rewards_t - rewards_t.mean()) / (rewards_t.std() + 1e-8)
+                if args.use_value_baseline and len(group_values) == len(group_rewards):
+                    # Learned critic baseline: advantage = reward - V(s). Far lower
+                    # variance than group-normalized REINFORCE, and keeps the
+                    # absolute scale of the driving delta (needed to push keep_ratio
+                    # upward toward the SOTA objective).
+                    values_t = torch.stack(group_values)
+                    advantage = rewards_t - values_t.detach()
+                    value_loss = args.value_loss_weight * F.mse_loss(values_t, rewards_t.detach())
+                else:
+                    advantage = (rewards_t - rewards_t.mean()) / (rewards_t.std() + 1e-8)
+                    value_loss = zero_loss
 
                 # Budget policy loss: scene-level REINFORCE (Gaussian policy)
-                budget_log_probs_t = torch.tensor(group_budget_log_probs, device=device, dtype=torch.float32)
+                budget_log_probs_t = torch.stack(group_budget_log_probs)
                 budget_policy_loss = -(advantage.detach() * budget_log_probs_t).mean()
 
                 # Token selection policy loss: per-token counterfactual or scene-level
                 if args.counterfactual_k > 0:
-                    token_policy_loss = per_token_pg_loss
+                    token_policy_loss = torch.stack(group_token_pg_losses).mean()
                 else:
                     log_probs_t = torch.stack(group_log_probs)
                     token_policy_loss = -(advantage.detach() * log_probs_t).mean()
@@ -752,11 +1016,12 @@ def main():
 
                 local_mean_reward = rewards_t.mean().item()
                 local_mean_kr = float(np.mean(group_keep_ratios))
-                local_budget_log_prob = float(np.mean(group_budget_log_probs))
+                local_budget_log_prob = float(torch.stack(group_budget_log_probs).detach().mean().item())
                 local_selection_log_prob = float(np.mean(group_selection_log_probs))
                 local_safety_loss = float(np.mean(group_safety_losses))
             else:
                 policy_loss = zero_loss
+                value_loss = zero_loss
                 local_mean_reward = 0.0
                 local_mean_kr = 0.0
                 local_budget_log_prob = 0.0
@@ -775,7 +1040,7 @@ def main():
                                         ref_scorer.budget_net.parameters()):
                     kl_loss = kl_loss + args.budget_kl_beta * F.mse_loss(p_curr, p_ref, reduction='sum')
 
-            loss = policy_loss + kl_loss
+            loss = policy_loss + kl_loss + value_loss
             optimizer.zero_grad()
             loss.backward()
             if distributed:
@@ -871,20 +1136,31 @@ def _save(model, feat_mean, feat_std, n_cam, budget_log_std, out_dir, tag, args)
         "emb_dim": model.emb_dim, "n_cam": model.n_cam, "hidden": 256,
         "model_type": "TokenScorerWithBudget",
         "min_keep_ratio": model.min_kr, "max_keep_ratio": model.max_kr,
+        "use_value": bool(model.use_value),
     }))
     (save_dir / "manifest.json").write_text(json.dumps({
-        "spec": "budget_rl_v6_per_token_counterfactual",
-        "method": "Per-token counterfactual REINFORCE + Gaussian budget; true PDMS reward; KL on token_net only",
+        "spec": "budget_rl_v7_diff_topk",
+        "method": "Differentiable Top-K selection surrogate + Gaussian budget; true PDMS reward; KL on token_net only",
         "efficiency_beta": args.efficiency_beta,
+        "efficiency_mode": args.efficiency_mode,
+        "target_keep_ratio": args.target_keep_ratio,
         "safety_beta": args.safety_beta,
         "safety_margin": args.safety_margin,
         "driving_scale": args.driving_scale,
+        "delta_reward": args.delta_reward,
         "selection_pg_weight": args.selection_pg_weight,
         "kl_beta": args.kl_beta,
         "budget_kl_beta": args.budget_kl_beta,
         "min_keep_ratio": args.min_keep_ratio,
         "max_keep_ratio": args.max_keep_ratio,
         "counterfactual_k": args.counterfactual_k,
+        "selection_mode": args.selection_mode,
+        "selection_tau": args.selection_tau,
+        "use_value_baseline": args.use_value_baseline,
+        "value_loss_weight": args.value_loss_weight,
+        "budget_init_kr": args.budget_init_kr,
+        "scene_list": str(args.scene_list) if args.scene_list else None,
+        "init_budget_ckpt": str(args.init_budget_ckpt) if args.init_budget_ckpt else None,
         "train_json_dir": str(args.json_dir),
         "train_metric_cache": str(args.metric_cache),
         "tag": tag,

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -26,12 +27,14 @@ class TokenScorerWithBudget(nn.Module):
     """Scorer that outputs both per-token importance AND scene-level budget."""
 
     def __init__(self, emb_dim: int = 2048, n_cam: int = 3, hidden: int = 256,
-                 min_keep_ratio: float = 0.2, max_keep_ratio: float = 0.9):
+                 min_keep_ratio: float = 0.2, max_keep_ratio: float = 0.9,
+                 use_value: bool = False):
         super().__init__()
         self.emb_dim = emb_dim
         self.n_cam = n_cam
         self.min_kr = min_keep_ratio
         self.max_kr = max_keep_ratio
+        self.use_value = use_value
         d = emb_dim + n_cam
 
         # Per-token importance scorer (same architecture as TokenImportanceScorer)
@@ -50,6 +53,18 @@ class TokenScorerWithBudget(nn.Module):
             nn.Linear(hidden // 2, 1),  # raw logit → sigmoid → [min_kr, max_kr]
         )
 
+        # Value head (critic): scene_feat → scalar value estimate. Used by the
+        # PPO/actor-critic value-baseline variant to reduce REINFORCE variance.
+        if use_value:
+            self.value_net = nn.Sequential(
+                nn.LayerNorm(d),
+                nn.Linear(d, hidden), nn.GELU(),
+                nn.Linear(hidden, hidden // 2), nn.GELU(),
+                nn.Linear(hidden // 2, 1),
+            )
+        else:
+            self.value_net = None
+
     def forward(self, x: torch.Tensor):
         """
         Args:
@@ -59,6 +74,7 @@ class TokenScorerWithBudget(nn.Module):
             token_scores: (N,) per-token importance
             keep_ratio: scalar in [min_kr, max_kr], scene-level budget
             budget_logit: raw logit (for log_prob computation)
+            value: scalar value estimate (or None if use_value=False)
         """
         # Per-token scores
         token_scores = self.token_net(x).squeeze(-1)  # (N,)
@@ -70,7 +86,23 @@ class TokenScorerWithBudget(nn.Module):
         # Map to [min_kr, max_kr] via sigmoid
         keep_ratio = self.min_kr + (self.max_kr - self.min_kr) * torch.sigmoid(budget_logit)
 
-        return token_scores, keep_ratio, budget_logit
+        value = self.value_net(scene_feat).squeeze(-1) if self.use_value else None
+
+        return token_scores, keep_ratio, budget_logit, value
+
+    def set_budget_init(self, init_kr: float):
+        """Anchor the budget head's initial keep_ratio to `init_kr`.
+
+        Sets the final Linear bias so that (with freshly-initialized preceding
+        layers outputting ~0) the raw logit ≈ logit(p) where
+        p = (init_kr - min_kr) / (max_kr - min_kr). This makes training start at
+        the desired keep_ratio instead of the sigmoid(0)=0.5 default midpoint.
+        """
+        p = (init_kr - self.min_kr) / (self.max_kr - self.min_kr)
+        p = float(min(max(p, 1e-3), 1 - 1e-3))
+        logit = float(np.log(p / (1.0 - p)))
+        with torch.no_grad():
+            self.budget_net[-1].bias.fill_(logit)
 
     def forward_token_only(self, x: torch.Tensor) -> torch.Tensor:
         """Compatibility: just return per-token scores (for fixed-r eval)."""
@@ -105,13 +137,15 @@ class BudgetScorerRunner:
         self.emb_dim = int(cfg["emb_dim"])
         self.min_kr = float(cfg.get("min_keep_ratio", 0.2))
         self.max_kr = float(cfg.get("max_keep_ratio", 0.9))
+        self.use_value = bool(cfg.get("use_value", False))
         self.model = TokenScorerWithBudget(
             emb_dim=self.emb_dim, n_cam=self.n_cam,
             hidden=int(cfg["hidden"]),
             min_keep_ratio=self.min_kr, max_keep_ratio=self.max_kr,
+            use_value=self.use_value,
         )
         sd = torch.load(ckpt_dir / "checkpoint.pt", map_location=device, weights_only=False)
-        self.model.load_state_dict(sd)
+        self.model.load_state_dict(sd, strict=False)
         self.model.eval().to(device)
         norm = torch.load(ckpt_dir / "feature_norm.pt", map_location=device, weights_only=False)
         self.mean = norm["mean"].to(device)
@@ -128,5 +162,5 @@ class BudgetScorerRunner:
     def score_budget(self, vision_feat, vision_token_positions, vision_blocks):
         """Returns (token_scores_cpu, keep_ratio_float)."""
         x = self.build_input(vision_feat, vision_token_positions, vision_blocks)
-        token_scores, keep_ratio, _ = self.model(x)
+        token_scores, keep_ratio, _, _ = self.model(x)
         return token_scores.detach().to("cpu", torch.float32), float(keep_ratio.item())

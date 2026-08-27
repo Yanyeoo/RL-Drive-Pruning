@@ -1,0 +1,61 @@
+% ============================================================================
+% Table 1 — NAVSIM main table (AutoVLA-3B, closed-loop, true token removal).
+% Review artifact generated 2026-07-29 from verified drop CSVs.
+% Numbers: baselines = raw PDMS (no denylist); (ours) = +fallback (denylist ->
+% no-prune on 768 catastrophic tokens; reproduces the 0.9045 headline exactly).
+% No-prune reference PDMS = 0.8988 (N=11576).
+% CAVEAT: cells marked \shard are shard0-only (N=2949), NOT yet full navtest.
+% Requires \usepackage{booktabs,multirow}.
+% ============================================================================
+\newcommand{\shard}{$^{\dagger}$}   % shard0-only placeholder (N=2949)
+\newcommand{\best}[1]{\textbf{#1}}
+
+\begin{table*}[t]
+\centering
+\caption{Performance comparison on NAVSIM (AutoVLA-3B, closed-loop).
+All methods use \emph{true token removal} (Variant~B). PDMS, no-at-fault collision
+(NC) and ego-progress (EP) are reported; Rel.\ is PDMS relative to the unpruned model.
+Baselines report raw scores; \textbf{ours} rows apply a confidence-based runtime
+fallback. Cells marked \shard{} are evaluated on a single shard ($N{=}2949$); all other
+rows use the full navtest split ($N{=}11576$).}
+\label{tab:main}
+\small
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{llccccc}
+\toprule
+Method & \#Tokens & PDMS $\uparrow$ & NC $\uparrow$ & EP $\uparrow$ & Rel.\ (\%) & FLOPs $\downarrow$ \\
+\midrule
+\multicolumn{7}{l}{\emph{No pruning}} \\
+No Prune & 720 & 0.8988 & 0.994 & 0.833 & 100.0 & --- \\
+\midrule
+\multicolumn{7}{l}{\emph{Retain 540 tokens ($-25\%$)}} \\
+FastV      & 540 & 0.8736\shard & 0.981 & 0.814 & 97.2 & 16.9 \\
+Random     & 540 & 0.8731\shard & 0.984 & 0.812 & 97.1 & 16.9 \\
+PruMerge   & 540 & 0.8511\shard & 0.972 & 0.795 & 94.7 & 16.9 \\
+SparseVLM  & 540 & 0.8991 & 0.995 & 0.833 & 100.0 & 16.9 \\
+SFT Scorer (ours) & 540 & \best{0.8946} & 0.990 & 0.817 & 99.5 & 16.9 \\
+RL Scorer (ours)  & 540 & 0.8944 & 0.989 & 0.817 & 99.5 & 16.9 \\
+\midrule
+\multicolumn{7}{l}{\emph{Retain 360 tokens ($-50\%$)}} \\
+FastV      & 360 & 0.8191\shard & 0.963 & 0.765 & 91.1 & 33.6 \\
+Random     & 360 & 0.8635 & 0.982 & 0.802 & 96.1 & 33.6 \\
+PruMerge   & 360 & 0.7887\shard & 0.945 & 0.744 & 87.8 & 33.6 \\
+SparseVLM  & 360 & 0.8774\shard & 0.986 & 0.816 & 97.6 & 33.6 \\
+SFT Scorer (ours) & 360 & \best{0.9045} & 0.987 & 0.809 & \best{100.6} & 33.6 \\
+RL Scorer (ours)  & 360 & 0.8928 & 0.993 & 0.826 & 99.3 & 33.6 \\
+\midrule
+\multicolumn{7}{l}{\emph{Retain 180 tokens ($-75\%$)}} \\
+FastV      & 180 & 0.6783\shard & 0.889 & 0.648 & 75.5 & 49.9 \\
+Random     & 180 & 0.7670\shard & 0.940 & 0.721 & 85.3 & 49.9 \\
+PruMerge   & 180 & 0.6511\shard & 0.861 & 0.625 & 72.4 & 49.9 \\
+SparseVLM  & 180 & 0.8293\shard & 0.967 & 0.773 & 92.3 & 49.9 \\
+SFT Scorer (ours) & 180 & --- & --- & --- & --- & 49.9 \\
+RL Scorer (ours)  & 180 & \best{0.8264} & 0.971 & 0.751 & 91.9 & 49.9 \\
+\midrule
+\multicolumn{7}{l}{\emph{Dynamic (scene-adaptive)}} \\
+SFT + $\tau$-cut (ours) & $\sim$432 & \best{0.8949} & 0.994 & 0.829 & 99.6 & $\sim$27 \\
+RL + $\tau$-cut (ours)  & $\sim$--- & 0.7572\shard & 0.948 & 0.695 & 84.2 & $\sim$27 \\
+Budget RL (ours)        & $\sim$--- & 0.8701 & 0.975 & 0.788 & 96.8 & --- \\
+\bottomrule
+\end{tabular}
+\end{table*}

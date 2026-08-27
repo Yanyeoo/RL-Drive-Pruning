@@ -48,6 +48,9 @@ def parse_args():
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--warmup", type=int, default=3, help="Warmup scenes (excluded from stats)")
     p.add_argument("--output", type=str, default="results/profiling/wallclock_profile.json")
+    p.add_argument("--budget-ckpt", type=str, default=None,
+                   help="Path to a trained TokenScorerWithBudget ckpt; adds an "
+                        "'rl_budget' config profiling the deployed learned-budget policy.")
     return p.parse_args()
 
 
@@ -60,7 +63,8 @@ def build_agent(selector, keep_ratio, gpu, scorer_ckpt=None):
     agent = AutoVLAWithTokenPruneAgent(
         trajectory_sampling=ts,
         checkpoint_path=str(ROOT / "models/AutoVLA/AutoVLA_PDMS_89.ckpt"),
-        sensor_data_path=str(ROOT / "data/navsim_v2_local"),
+        sensor_data_path=str(Path(os.environ["OPENSCENE_DATA_ROOT"]) /
+                             "sensor_blobs/test/openscene-v1.1/sensor_blobs/test"),
         codebook_cache_path=str(ROOT / "code/third_party/AutoVLA/codebook_cache/agent_vocab.pkl"),
         config_path=str(ROOT / "code/third_party/AutoVLA/config/training/qwen2.5-vl-3B-navtest-grpo-nocot.yaml"),
         device=f"cuda:{gpu}",
@@ -73,28 +77,20 @@ def build_agent(selector, keep_ratio, gpu, scorer_ckpt=None):
 
 
 def load_scenes(n_scenes, gpu):
-    """Load scene data from navtest shard0."""
-    from hydra import compose, initialize_config_dir
-    from navsim.common.dataloader import SceneLoader
+    """Load scene dicts from the navtest json set (shard0 tokens).
 
-    config_dir = str(ROOT / "code/third_party/AutoVLA/navsim/navsim/planning/script/config")
-    with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg = compose(config_name="default_run_pdm_score_cot.yaml", overrides=[
-            "train_test_split=navtest_local_filtered_shard0_20260616_154858",
-            f"metric_cache_path={ROOT}/data/navtest_metric_cache",
-            f"+json_data_path={ROOT}/data/navtest_nocot",
-        ])
-
-    scene_loader = SceneLoader(
-        sensor_blobs_path=Path(str(ROOT / "data/navsim_v2_local")),
-        scene_filter=cfg.train_test_split,
-        sensor_config=None,
-    )
-
-    tokens = list(scene_loader.tokens)[:n_scenes]
-    scenes = []
-    for t in tokens:
-        scenes.append(scene_loader.get_scene_from_token(t))
+    `AutoVLAWithTokenPruneAgent.compute_trajectory` consumes the same json scene
+    dict that training/eval use (it needs keys like 'instruction'), NOT a navsim
+    `Scene` object — so we read the json directly and skip SceneLoader entirely.
+    """
+    json_dir = ROOT / "data/navtest_nocot"
+    files = sorted(json_dir.glob("*.json"))[:n_scenes]
+    scenes, tokens = [], []
+    for f in files:
+        with open(f) as fh:
+            data = json.load(fh)
+        scenes.append(data)
+        tokens.append(data["token"])
     return scenes, tokens
 
 
@@ -104,11 +100,20 @@ def profile_config(agent, scenes, tokens, warmup, config_name):
     torch.cuda.synchronize()
 
     latencies = []
+    n_failed = 0
     for i, (scene, token) in enumerate(zip(scenes, tokens)):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-        _ = agent.compute_trajectory(scene)
+        # A single malformed scene must not abort the whole profiling run; the
+        # latency statistic is over the scenes that decode successfully.
+        try:
+            _ = agent.compute_trajectory(scene)
+        except Exception as e:
+            n_failed += 1
+            if n_failed <= 2:
+                print(f"  [{config_name}] scene {i} failed: {type(e).__name__}: {e}", flush=True)
+            continue
 
         torch.cuda.synchronize()
         t1 = time.perf_counter()
@@ -121,6 +126,11 @@ def profile_config(agent, scenes, tokens, warmup, config_name):
             print(f"  [{config_name}] scene 0 (warmup): {elapsed:.2f}s", flush=True)
 
     peak_mem_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+
+    if not latencies:
+        print(f"  [{config_name}] NO successful scene ({n_failed} failed) — skipping", flush=True)
+        return {"config": config_name, "n_measured": 0, "n_failed": n_failed,
+                "mean_s": float("nan"), "peak_mem_mb": peak_mem_mb}
 
     latencies = np.array(latencies)
     stats = {
@@ -204,6 +214,11 @@ def main():
         ("attn_L12_r0.5", "attn_L12", 0.5, None),
         ("fastv_l2_r0.5", "fastv_l2", 0.5, None),
     ]
+    # The deployed RL policy: budget head chooses keep_ratio per scene, so its
+    # latency is the number that actually backs the efficiency claim. keep_ratio
+    # passed here is ignored by the scorer_budget selector (it is learned).
+    if args.budget_ckpt:
+        configs.append(("rl_budget", "scorer_budget", 0.5, args.budget_ckpt))
 
     all_stats = []
 
@@ -234,11 +249,15 @@ def main():
     print(f"{'Config':<20} {'Mean(s)':<10} {'P50(s)':<10} {'P95(s)':<10} {'Peak(MB)':<12} {'Speedup':<10}")
     print("-" * 80)
 
-    baseline_mean = next(s["mean_s"] for s in all_stats if s["config"] == "r1.0_noprune")
-    for s in all_stats:
-        speedup = baseline_mean / s["mean_s"] if s["mean_s"] > 0 else 0
+    ok = [s for s in all_stats if s.get("n_measured", 0) > 0]
+    baseline_mean = next((s["mean_s"] for s in ok if s["config"] == "r1.0_noprune"), None)
+    for s in ok:
+        speedup = (baseline_mean / s["mean_s"]) if (baseline_mean and s["mean_s"] > 0) else float("nan")
         print(f"{s['config']:<20} {s['mean_s']:<10.3f} {s['p50_s']:<10.3f} "
               f"{s['p95_s']:<10.3f} {s['peak_gpu_mb']:<12.0f} {speedup:<10.2f}x")
+    for s in all_stats:
+        if s.get("n_measured", 0) == 0:
+            print(f"{s['config']:<20} (all scenes failed: {s.get('n_failed', '?')})")
 
     print("\n[profile] Theoretical FLOPs (Variant A = attn-mask, no real token drop):")
     print(f"  NOTE: Variant A masks tokens in attention but does NOT reduce sequence length.")

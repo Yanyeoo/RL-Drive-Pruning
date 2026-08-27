@@ -4,6 +4,11 @@
 # git (workspace-mounted), not committed.
 # =====================================================================
 
+# ---------- machine-local env config ----------
+# env.example.sh is tracked as the template; the filled-in copy holds
+# machine-specific absolute paths and must not be committed.
+env.sh
+
 # ---------- data / models / checkpoints (NEVER commit) ----------
 data/**
 !data/.gitkeep

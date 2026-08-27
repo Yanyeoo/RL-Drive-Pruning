@@ -6,6 +6,25 @@
 
 ---
 
+## Reproduction & released weights
+
+- **[`docs/REPRODUCE.md`](docs/REPRODUCE.md)** — end-to-end guide from a bare
+  machine, with a verification command after every step. Read its three
+  up-front warnings first (hard-coded paths, json absolute paths,
+  `EVAL_WORKERS=1`).
+- **[`release_ckpt/`](release_ckpt/)** — 10 trained scorer checkpoints (58MB
+  total, ~6.6MB each) with the full results table.
+- **[`autovla_overlay/`](autovla_overlay/)** — our AutoVLA-side config files and
+  source patch; required, since AutoVLA is a separately-licensed nested clone
+  whose contents this repo cannot track.
+
+Best checkpoint so far: `release_ckpt/v11_hard50_kl`, navtest PDMS **0.898719**
+(N=11576) versus the no-prune upper bound of 0.898845 — i.e. **level with
+no-prune but 0.000126 short of beating it**, at `keep_ratio ≈ 0.69`. Wall-clock
+latency is not yet verified; see `docs/REPRODUCE.md` §8.
+
+---
+
 ## TL;DR
 
 Vision-Language-Action (VLA) models for autonomous driving spend the **vast majority of their FLOPs on vision tokens**, yet most of those tokens carry redundant information for the driving decision at hand. RL-Drive learns a **scene-adaptive token pruning policy** on top of a frozen VLA backbone, jointly optimizing **how many** tokens to keep (budget) and **which** tokens to keep (importance), trained with **GRPO** against a closed-loop driving metric.

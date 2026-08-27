@@ -1,0 +1,53 @@
+# Core pins verified on the training node (Python 3.9.23, CUDA 12.1, H20 / sm_90).
+# Exported from the working conda env — these are the versions all reported
+# numbers were produced with.
+#
+# torch/torchvision carry a +cu121 local version tag, so install them from the
+# PyTorch index first:
+#
+#   pip install torch==2.4.0 torchvision==0.19.0 \
+#       --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+#
+# nuplan-devkit and navsim are NOT on PyPI under these versions — they come from
+# the AutoVLA checkout (see docs/REPRODUCE.md §3):
+#   pip install -e code/third_party/AutoVLA/navsim
+#   pip install -e <your nuplan-devkit clone>
+
+torch==2.4.0
+torchvision==0.19.0
+
+transformers==4.49.0
+accelerate==1.5.2
+peft==0.17.1
+qwen-vl-utils==0.0.10
+timm==1.0.27
+einops==0.8.2
+
+pytorch-lightning==2.2.1
+torchmetrics==1.8.2
+tensorboard==2.16.2
+
+hydra-core==1.2.0
+omegaconf==2.3.0
+
+# numpy must stay <1.24: nuplan-devkit 1.2.0 uses np.float/np.bool aliases
+numpy==1.23.4
+pandas==2.3.3
+pyarrow==21.0.0
+scipy==1.13.1
+joblib==1.5.3
+
+# geometry stack required by nuplan map APIs
+shapely==2.0.7
+geopandas==1.0.1
+rtree==1.4.1
+
+opencv-python-headless==4.9.0.80
+pillow==11.3.0
+matplotlib==3.9.4
+bokeh==2.4.3
+
+aioboto3==13.1.1
+retry==0.9.2
+tqdm==4.67.3

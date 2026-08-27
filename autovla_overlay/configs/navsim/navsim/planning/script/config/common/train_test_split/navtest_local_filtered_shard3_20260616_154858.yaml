@@ -1,0 +1,3 @@
+data_split: test
+defaults:
+- scene_filter: navtest_local_filtered_shard3_20260616_154858

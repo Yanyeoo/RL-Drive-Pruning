@@ -1,0 +1,96 @@
+# =============================================================================
+# MA2.3 — GRPO RL training config (NAVTEST, no-CoT)
+#
+# Derived from: qwen2.5-vl-3B-nuplan-grpo-cot.yaml
+#
+# Differences from upstream cot template:
+#   - use_cot=false                       (no-CoT path; aligns with MA2.1 output)
+#   - pretrained_model_path -> abs path   (project-local Qwen2.5-VL-3B)
+#   - sft_model_path        -> abs path   (AutoVLA_PDMS_89.ckpt; 16G)
+#   - data.train.json_dataset_path        (MA2.1 output)
+#   - data.train.sensor_data_path         (nested sensor_blobs layout discovered in MA2.1)
+#   - data.train.metric_cache_path        (MA2.2 output)
+#   - data.train.scene_filter -> navtest_local_filtered  (drop 4 missing-image logs)
+#   - data.val.* points to the SAME train set for smoke (small-data closed-loop)
+#   - rl.cot_penalty.coef=0               (no-CoT path; disable cot length penalty)
+#
+# Entry point: tools/run_rft.py
+# =============================================================================
+name: qwen2.5-vl-3B-navtest-grpo-nocot
+description: AutoVLA GRPO RL on navtest (no-CoT), with MA2.1 jsons + MA2.2 metric_cache
+
+model:
+  use_cot: false
+  pretrained_model_path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/models/Qwen2.5-VL-3B-Instruct
+  sft_model_path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/models/AutoVLA/AutoVLA_PDMS_89.ckpt
+  codebook_cache_path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/code/third_party/AutoVLA/codebook_cache/agent_vocab.pkl
+  train_vision_backbone: false
+  train_lm_backbone: true
+  lora:
+    use: true
+    task_type: CAUSAL_LM
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+    r: 8
+    alpha: 8
+    dropout: 0.1
+    bias: "none"
+  trajectory: # future trajectory parameters
+    num_poses: 10
+    interval_length: 0.5
+    time_horizon: 5.0
+  tokens: # action token parameters, depends on the pretrained large model
+    action_start_id: 151665
+    ignore_index: -100
+    assistant_id: [151644, 77091]
+  video:
+    min_pixels: 109760
+    max_pixels: 109760
+
+data:
+  train:
+    path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/data/navtest_nocot
+    scene_filter: ./navsim/navsim/planning/script/config/common/train_test_split/scene_filter/navtest_local_filtered.yaml
+    metric_cache_path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/data/navtest_metric_cache
+    json_dataset_path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/data/navtest_nocot
+    sensor_data_path: /apdcephfs/private_shayladeng/tokenrl/data/navsim_v2/sensor_blobs/test/openscene-v1.1/sensor_blobs/test
+  val:
+    # For formal training: val = same as train (online RL, no separate val split needed)
+    path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/data/navtest_nocot
+    scene_filter: ./navsim/navsim/planning/script/config/common/train_test_split/scene_filter/navtest_local_filtered.yaml
+    metric_cache_path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/data/navtest_metric_cache
+    json_dataset_path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/data/navtest_nocot
+    sensor_data_path: /apdcephfs/private_shayladeng/tokenrl/data/navsim_v2/sensor_blobs/test/openscene-v1.1/sensor_blobs/test
+
+training:
+  batch_size: 1     # required: GRPOAutoVLA only supports bs=1 (see models/autovla.py L239)
+  learning_rate: 0.00003
+  epochs: 1
+  num_workers: 1
+  weight_decay: 0.01
+  devices: [0, 1]   # dual-card H20. FSDP FULL_SHARD. all_gather group_size=2 for GRPO advantage.
+  dtype: fp32       # fp32|bf16|fp16. bf16/fp16 SIGFPE on H20 (sm_90)+torch2.4+cu121.
+                    # fp32+TF32 still gives ~93 tok/s. ~15GB policy + ~15GB ref + LoRA grads ≈ 40-50GB on 96GB H20.
+  sample:
+    max_length: 2048
+    temperature: 0.9
+    top_k: 50       # was 0.0 -> caused SIGFPE inside TopKLogitsWarper (topk(k=0))
+    top_p: 1.0
+
+rl:
+  kl_beta: 0.04
+  reward:
+    sliding_window_size: 100
+    scale: 10
+  cot_penalty:
+    coef: 0.0     # disabled: no-CoT path
+    center: 400.0
+    weight: 0.3
+
+inference:
+  batch_size: 1
+  num_workers: 1
+  sample:
+    max_length: 2048
+    temperature: 0.01
+    top_k: 0.0
+    top_p: 1.0

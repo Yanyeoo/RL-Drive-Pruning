@@ -1,0 +1,317 @@
+diff --git a/dataset_utils/preprocessing/nuplan_dataset.py b/dataset_utils/preprocessing/nuplan_dataset.py
+index ad64fc7..e38bfb9 100755
+--- a/dataset_utils/preprocessing/nuplan_dataset.py
++++ b/dataset_utils/preprocessing/nuplan_dataset.py
+@@ -40,9 +40,19 @@ class NuplanCoTAnnotationDataset(Dataset):
+         trajectory_sampling = TrajectorySampling(time_horizon=5, interval_length=self.interval_length)
+         self._agent = VlaAgent(trajectory_sampling=trajectory_sampling)
+         
++        # Support both layouts:
++        #  - Original (AutoVLA): dataset_path contains 'placeholder', replaced to derive logs/sensors paths.
++        #  - navhard/navsim_v2:  pass dataset_path + sensor_blobs_path explicitly via config.
++        if 'placeholder' in self.data_path:
++            log_path = self.data_path.replace('placeholder', 'navsim_logs')
++            sensor_path = self.data_path.replace('placeholder', 'sensor_blobs')
++        else:
++            log_path = config['navsim_log_path']
++            sensor_path = config['sensor_blobs_path']
++
+         self._scene_loader = SceneLoader(
+-            data_path=Path(self.data_path.replace('placeholder', 'navsim_logs')),
+-            sensor_blobs_path=Path(self.data_path.replace('placeholder', 'sensor_blobs')),
++            data_path=Path(log_path),
++            sensor_blobs_path=Path(sensor_path),
+             scene_filter=scene_filter,
+             sensor_config=self._agent.get_sensor_config(),
+         )
+diff --git a/models/autovla.py b/models/autovla.py
+index 9815970..25f1a2a 100644
+--- a/models/autovla.py
++++ b/models/autovla.py
+@@ -85,7 +85,9 @@ class GRPOAutoVLA(pl.LightningModule):
+             # Normalize the rewards to compute the advantage.
+             groupped_rewards = self.all_gather(reward)
+             print(groupped_rewards)
+-            advantage = (reward - groupped_rewards.mean()) / (groupped_rewards.std() + 1e-4)
++            # Use biased std (population) to avoid NaN when N=1 (single-card smoke,
++            # batch_size=1, num_generations=1). Unbiased std on n=1 returns NaN.
++            advantage = (reward - groupped_rewards.mean()) / (groupped_rewards.std(unbiased=False) + 1e-4)
+ 
+         # Compute the per-token log probabilities.
+         per_token_logps = self.get_per_token_logps(
+@@ -217,7 +219,10 @@ class GRPOAutoVLA(pl.LightningModule):
+         torch.manual_seed(int(str(device).split(':')[-1]))
+ 
+         # Generate completion
+-        with torch.no_grad():
++        # Force-disable autocast around generate: prevents Lightning / parent
++        # contexts from silently casting params to bf16/fp16 during sampling.
++        # See docs/journal/2026-06-15_ma2_3_grpo_smoke_debug.md for context.
++        with torch.no_grad(), torch.amp.autocast(device_type='cuda', enabled=False):
+             prompt_completion_ids = model.vlm.generate(
+                 **model_inputs,
+                 do_sample=True,
+@@ -477,10 +482,32 @@ class AutoVLA(torch.nn.Module):
+         self.device = device
+ 
+         model_path = config['model']['pretrained_model_path']
++        # dtype is configurable via training.dtype (fp32|bf16|fp16). default fp32
++        # because bf16/fp16 cuBLAS GEMM SIGFPEs on Hopper (sm_90) H20 with
++        # torch 2.4 + cu121. fp32 + TF32 still gives ~93 tok/s on this stack.
++        _dtype_str = config.get('training', {}).get('dtype', 'fp32')
++        _dtype_map = {'fp32': torch.float32, 'bf16': torch.bfloat16, 'fp16': torch.float16}
++        _torch_dtype = _dtype_map.get(_dtype_str, torch.float32)
++        # attn_implementation is configurable via training.attn_impl. default 'eager'
++        # because the default 'sdpa' path triggers a cuBLAS fp32 GEMM SIGFPE inside
++        # generate() on real 3-video batches (video_grid_thw=(3,3)) on H20 sm_90 +
++        # torch 2.4 + cu121. 'eager' bypasses the fused SDPA kernel.
++        # See docs/journal/2026-06-15_ma2_3_grpo_smoke_debug.md §2.4 (E1).
++        _attn_impl = config.get('training', {}).get('attn_impl', 'eager')
++
++        # Optionally disable TF32 fp32 GEMM on cuBLAS. The TF32 GEMM kernel on
++        # H20 sm_90 + torch 2.4 + cu121 SIGFPEs on the real 3-video batch shape;
++        # disabling it forces the strict fp32 IEEE GEMM kernel.
++        # See docs/journal/2026-06-15_ma2_3_grpo_smoke_debug.md §2.4 (E3).
++        if config.get('training', {}).get('disable_tf32', True):
++            torch.backends.cuda.matmul.allow_tf32 = False
++            torch.backends.cudnn.allow_tf32 = False
++
+         self.vlm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+             model_path,
+-            torch_dtype=torch.bfloat16,
+-            device_map=device
++            torch_dtype=_torch_dtype,
++            device_map=device,
++            attn_implementation=_attn_impl,
+         )
+         self.processor = AutoProcessor.from_pretrained(model_path)
+         self.action_tokenizer = ActionTokenizer(self.processor.tokenizer, 
+diff --git a/models/utils/score.py b/models/utils/score.py
+index 2118494..5a46f8a 100644
+--- a/models/utils/score.py
++++ b/models/utils/score.py
+@@ -41,19 +41,27 @@ class PDM_Reward:
+         self.simulator = PDMSimulator(self.future_sampling)
+         self.scorer= PDMScorer(self.future_sampling)
+ 
+-    def rl_pdm_score(self, trajectory, token):
++    def rl_pdm_score(self, trajectory, token, shaped=False, baseline_scores=None,
++                     return_components=False, use_true_pdms=False):
+         """
+-        Compute the rl pdm reward for a given token using the pdm_score metrics, excluding the two_frame_extended_comfort metric.
++        Compute the rl pdm reward for a given token.
+ 
+         :param trajectory: model output.
+         :param token: The scene token.
++        :param shaped: If True, return weighted sub-metric delta reward.
++                       If False, return raw PDMS product.
++        :param baseline_scores: dict of per-scene baseline sub-metric scores for delta computation.
++        :param return_components: when True, also return the six raw sub-metrics.
++        :param use_true_pdms: If True, return raw PDMS product (result.score) directly.
++                              This bypasses the shaped delta reward and uses the exact
++                              same PDMScore as navtest eval, eliminating the proxy gap.
+         """
+         metric_cache_path = self.metric_cache_loader.metric_cache_paths[token]
+         with lzma.open(metric_cache_path, "rb") as f:
+             metric_cache = pickle.load(f)
+ 
+         try:
+-            # Compute the pdm score
++            # Compute the pdm score (same code path as eval)
+             result = pdm_score(
+                 metric_cache=metric_cache,
+                 model_trajectory=trajectory,
+@@ -62,11 +70,66 @@ class PDM_Reward:
+                 scorer=self.scorer,
+             )
+ 
+-            final_reward = result.score
++            # v5: use true PDMS product directly as reward
++            # This eliminates the simulator-proxy → shaped-delta gap.
++            # result.score is the multiplicative PDMS product used in navtest eval.
++            if use_true_pdms:
++                if return_components:
++                    sub_scores = {
++                        'collision': result.no_at_fault_collisions,
++                        'drivable': result.drivable_area_compliance,
++                        'progress': result.ego_progress,
++                        'ttc': result.time_to_collision_within_bound,
++                        'comfort': result.comfort,
++                        'direction': result.driving_direction_compliance,
++                    }
++                    return result.score, sub_scores
++                return result.score
+ 
+-            return final_reward
++            if not shaped:
++                return result.score
+ 
+-        except Exception as e:
+-            print(f"Reward calculation failed")
++            # --- Shaped sub-metric delta reward (legacy) ---
++            sub_scores = {
++                'collision': result.no_at_fault_collisions,
++                'drivable': result.drivable_area_compliance,
++                'progress': result.ego_progress,
++                'ttc': result.time_to_collision_within_bound,
++                'comfort': result.comfort,
++                'direction': result.driving_direction_compliance,
++            }
++
++            weights = {
++                'progress': 0.35,
++                'collision': 0.20,
++                'drivable': 0.15,
++                'ttc': 0.15,
++                'direction': 0.10,
++                'comfort': 0.05,
++            }
++
++            alpha = 0.3
++            beta = 0.7
++
++            absolute_reward = sum(weights[k] * sub_scores[k] for k in weights)
+ 
++            if baseline_scores is not None:
++                delta_reward = sum(
++                    weights[k] * (sub_scores[k] - baseline_scores.get(k, 0.0))
++                    for k in weights
++                )
++            else:
++                delta_reward = 0.0
++                alpha = 1.0
++                beta = 0.0
++
++            reward = alpha * absolute_reward + beta * delta_reward
++            if return_components:
++                return reward, sub_scores
++            return reward
++
++        except Exception as e:
++            print(f"Reward calculation failed: {e}")
++            if return_components:
++                return 0.0, {}
+             return 0.0
+diff --git a/navsim/navsim/agents/autovla_agent.py b/navsim/navsim/agents/autovla_agent.py
+index 7358916..8c34270 100644
+--- a/navsim/navsim/agents/autovla_agent.py
++++ b/navsim/navsim/agents/autovla_agent.py
+@@ -1,4 +1,5 @@
+ from typing import Any, List, Dict, Optional, Union
++import os
+ import torch
+ import numpy as np
+ 
+@@ -384,9 +385,14 @@ class AutoVLAAgent(AbstractAgent):
+                 )
+                 self.autovla.vlm = get_peft_model(self.autovla.vlm, lora_config)
+         
+-        state_dict: Dict[str, Any] = torch.load(self._checkpoint_path, 
+-                                                map_location=self.autovla.device)["state_dict"]
+-        self.autovla.load_state_dict( {k.replace("autovla.", ""): v for k, v in state_dict.items()}, strict=False)
++        # Support running without a fine-tuned checkpoint (e.g. 7B base model)
++        if self._checkpoint_path and os.path.exists(self._checkpoint_path):
++            state_dict: Dict[str, Any] = torch.load(self._checkpoint_path, 
++                                                    map_location=self.autovla.device)["state_dict"]
++            self.autovla.load_state_dict( {k.replace("autovla.", ""): v for k, v in state_dict.items()}, strict=False)
++        else:
++            print(f"[AutoVLAAgent] No checkpoint loaded (path={self._checkpoint_path!r}). "
++                  "Using base pretrained model.", flush=True)
+ 
+     def name(self) -> str:
+         """Inherited, see superclass."""
+diff --git a/tools/preprocessing/nocot_sample_generation.py b/tools/preprocessing/nocot_sample_generation.py
+index e60dfa2..e754476 100644
+--- a/tools/preprocessing/nocot_sample_generation.py
++++ b/tools/preprocessing/nocot_sample_generation.py
+@@ -9,7 +9,8 @@ from transformers import AutoProcessor
+ from torch.utils.data import DataLoader
+ import shutil
+ from dataset_utils.preprocessing.nuplan_dataset import NuplanCoTAnnotationDataset, DataCollator as NuplanDataCollator
+-from dataset_utils.preprocessing.waymo_e2e_dataset import WaymoE2ECoTAnnotationDataset, DataCollator as WaymoDataCollator
++# Lazy import waymo dataset to avoid forcing tensorflow / waymo_open_dataset dependencies when running nuplan-only preprocessing.
++# from dataset_utils.preprocessing.waymo_e2e_dataset import WaymoE2ECoTAnnotationDataset, DataCollator as WaymoDataCollator
+ 
+ 
+ CAM_LIST = ['front', 'front_left', 'front_right', 
+@@ -111,6 +112,10 @@ if __name__ == "__main__":
+         dataset = NuplanCoTAnnotationDataset(config, processor)
+         collator = NuplanDataCollator(processor)
+     elif dataset_name == "waymo":
++        # Lazy import to avoid tensorflow/waymo deps when not needed.
++        from dataset_utils.preprocessing.waymo_e2e_dataset import (
++            WaymoE2ECoTAnnotationDataset, DataCollator as WaymoDataCollator,
++        )
+         dataset = WaymoE2ECoTAnnotationDataset(config, processor)
+         collator = WaymoDataCollator(processor)
+     else:
+diff --git a/tools/run_rft.py b/tools/run_rft.py
+index 997c15c..a4c5013 100644
+--- a/tools/run_rft.py
++++ b/tools/run_rft.py
+@@ -134,7 +134,12 @@ if __name__ == "__main__":
+         model.autovla.vlm = get_peft_model(model.autovla.vlm, lora_config)
+         print("LoRA-enabled model trainable parameters:",
+               sum(p.numel() for p in model.autovla.vlm.parameters() if p.requires_grad))
+-    model = model.to(torch.bfloat16)
++    # dtype is configurable via training.dtype (fp32|bf16|fp16). default fp32 due
++    # to bf16/fp16 cuBLAS GEMM SIGFPEs on Hopper (sm_90) H20 + torch 2.4 + cu121.
++    _dtype_str = config.get('training', {}).get('dtype', 'fp32')
++    _dtype_map = {'fp32': torch.float32, 'bf16': torch.bfloat16, 'fp16': torch.float16}
++    _torch_dtype = _dtype_map.get(_dtype_str, torch.float32)
++    model = model.to(_torch_dtype)
+ 
+     # Training
+     wrap_policy = functools.partial(
+@@ -147,28 +152,35 @@ if __name__ == "__main__":
+     current_date = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+     save_dir = f"runs/grpo/{current_date}"
+     
++    # On single-GPU smoke we skip FSDP entirely (Lightning auto -> SingleDeviceStrategy).
++    # FSDP NO_SHARD + LoRA + generate triggered SIGFPE on H20 (sm_90)+torch2.4 even after
++    # forcing fp32. Multi-GPU runs still use FSDP via the original strategy branch.
++    _devices = config['training']['devices']
++    _n_devices = len(_devices) if isinstance(_devices, (list, tuple)) else int(_devices)
++    if _n_devices <= 1:
++        _strategy = "auto"
++    else:
++        _strategy = FSDPStrategy(
++            auto_wrap_policy=wrap_policy,
++            cpu_offload=False,
++            # Mixed precision training (dtype controlled by training.dtype)
++            mixed_precision=MixedPrecision(
++                param_dtype=_torch_dtype,
++                reduce_dtype=_torch_dtype,
++                buffer_dtype=_torch_dtype
++            ),
++            sharding_strategy='FULL_SHARD',
++            backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
++            state_dict_type='full',
++        )
++
+     trainer = Trainer(
+         num_nodes=1,
+         max_epochs=config['training']['epochs'],
+         accelerator="gpu",
+         devices=config['training']['devices'], 
+         num_sanity_val_steps=0,
+-        strategy=FSDPStrategy(
+-            auto_wrap_policy=wrap_policy,
+-            cpu_offload=False,
+-            # Mixed precision training
+-            mixed_precision=MixedPrecision(
+-                param_dtype=torch.bfloat16,
+-                reduce_dtype=torch.bfloat16,
+-                buffer_dtype=torch.bfloat16
+-            ),
+-            # sharding strategy
+-            sharding_strategy='FULL_SHARD',
+-            # prefetching backward computation
+-            backward_prefetch = BackwardPrefetch.BACKWARD_PRE,
+-            # save state dict type
+-            state_dict_type='full', # can be full or sharded
+-        ),
++        strategy=_strategy,
+         callbacks=[
+             ModelCheckpoint(
+                 monitor="avg_train_reward",

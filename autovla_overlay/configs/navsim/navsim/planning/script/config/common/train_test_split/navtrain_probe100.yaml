@@ -1,0 +1,4 @@
+defaults:
+  - scene_filter: navtrain_probe100
+
+data_split: trainval

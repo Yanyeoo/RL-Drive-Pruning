@@ -1,0 +1,30 @@
+name: qwen2.5-vl-3B-navtest
+description: |
+  Preprocessing dataset for AutoVLA nocot inference on navtest split.
+  Uses Qwen2.5-VL 3B processor only (no 72B CoT inference).
+  Aligns with AutoVLA upstream native single sensor_blobs_path design.
+  See design_decisions.md Revision 2026-06-15 for why navtest (not navhard).
+
+# model (only processor used for nocot, 3B is enough since we don't run 72B CoT inference)
+pretrained_model_path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/models/Qwen2.5-VL-3B-Instruct
+
+# preprocessing
+batch_size: 1
+num_workers: 8
+
+# dataset (navtest split, AutoVLA-native single-path layout)
+dataset_name: nuplan
+# dataset_path is kept (legacy field, parent of logs); the explicit paths below take precedence
+dataset_path: /apdcephfs/private_shayladeng/tokenrl/data/navsim_v2
+# Real paths for navtest split:
+#   navsim_log_path   = <root>/navsim_logs/test               (flat *.pkl)
+#   sensor_blobs_path = <root>/sensor_blobs/test/openscene-v1.1/sensor_blobs/test
+#     (Tencent storage layout has a double-nested openscene-v1.1/sensor_blobs/test
+#      wrapper around the actual <log>/CAM_*/*.jpg trees. Confirmed 2026-06-15 18:50.)
+navsim_log_path: /apdcephfs/private_shayladeng/tokenrl/data/navsim_v2/navsim_logs/test
+sensor_blobs_path: /apdcephfs/private_shayladeng/tokenrl/data/navsim_v2/sensor_blobs/test/openscene-v1.1/sensor_blobs/test
+scene_filter: ./navsim/navsim/planning/script/config/common/train_test_split/scene_filter/navtest_local_filtered.yaml
+# ^ Local copy of navtest.yaml with 4 missing-image logs removed
+#   (2021.06.03.13.55.17_veh-35_02419_02561, 2021.06.03.17.06.58_veh-35_03860_03992,
+#    2021.09.29.14.44.26_veh-28_00337_00504, 2021.10.06.07.26.10_veh-52_01245_02064)
+#   See journal 2026-06-15 19:00 for the missing-image diagnosis.

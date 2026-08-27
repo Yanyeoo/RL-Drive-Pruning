@@ -1,0 +1,3 @@
+data_split: test
+defaults:
+- scene_filter: navtest_smoke5_shard0_20260616_154725

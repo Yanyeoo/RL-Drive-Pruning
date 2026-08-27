@@ -1,0 +1,30 @@
+
+
+name: qwen2.5-vl-3B-navtrain_full
+description: |
+  Preprocessing dataset for AutoVLA nocot generation on the FULL NAVSIM navtrain split
+  (103,288 scene tokens). Used by M1.b₂ stage 2 (2026-06-24) to produce the per-scene
+  pretokenized .json that the multi-layer attention probe consumes.
+  Uses Qwen2.5-VL 3B processor only (no 72B CoT inference).
+  Created 2026-06-24 21:00 by copying qwen2.5-vl-3B-navtrain_probe100.yaml and
+  swapping scene_filter probe100 -> navtrain (full).
+
+# model (processor only)
+pretrained_model_path: /apdcephfs/private_shayladeng/tokenrl_autoVLA/models/Qwen2.5-VL-3B-Instruct
+
+# preprocessing
+batch_size: 1
+num_workers: 64
+
+# dataset (navtrain split, single-path layout — trainval has NO openscene-v1.1 wrapper,
+#  unlike navtest's sensor_blobs/test/openscene-v1.1/sensor_blobs/test double-nesting.
+#  Verified 2026-06-24 17:50 by direct ls of CAM_F0/*.jpg.)
+dataset_name: nuplan
+dataset_path: /apdcephfs/private_shayladeng/tokenrl/data/navsim_v2
+navsim_log_path: /apdcephfs/private_shayladeng/tokenrl/data/navsim_v2/navsim_logs/trainval
+sensor_blobs_path: /apdcephfs/private_shayladeng/tokenrl/data/navsim_v2/sensor_blobs/trainval
+scene_filter: ./navsim/navsim/planning/script/config/common/train_test_split/scene_filter/navtrain_avail19k.yaml
+# ^ Auto-generated 2026-06-24 21:22: subset of navtrain.yaml's 103,288 trigger
+#   tokens restricted to the 19,225 whose 15-frame context (history=4,
+#   future=10) has all CAM_F0 jpgs on disk. Avoids FileNotFoundError that
+#   killed the first stage 2 attempt at 21:11.

@@ -1,12 +1,44 @@
 # STATUS
 
 > 2026-08-26/27 RL SOTA H20 周期（v11：hard-example mining）
-> 周期号 20260826_v11r1 ｜ **已完成**：mining → 训练 → gate → full ×2 全部 DONE（08-27 19:06）
+> 周期号 20260826_v11r1 ｜ **已完成并收尾**：mining → 训练 → gate → full ×2 全部 DONE（08-27 19:06）
 > full 最佳 = **hard50_kl**（full 4-shard **0.898719**，距 no-prune SOTA **-0.000126**）
 > ⚠️ 仍未反超，但已是历史最接近（v10 -0.000571 → hard50 -0.000485 → **hard50_kl -0.000126**）
-> 下一个 AI 接手先读：本文件 +「v11 归因」+「v12 建议方向」
+>
+> 🔴 **节点已于 08-27 20:00 回收。所有产物已入 GitHub（`db9ba83`），无本地遗留依赖。**
+> **下一个 AI 接手：先读本文件「v12 起步指令」一节，可直接开跑，无需重跑 mining。**
 
-## 状态：🟡 v11 完成，hard50_kl 逼近 SOTA 至 -0.000126（未反超）
+## 状态：🟡 v11 完成，hard50_kl 逼近 SOTA 至 -0.000126（未反超）；节点已回收
+
+## v12 起步指令（新节点上照此执行）
+
+前置（新机器）：按 `docs/REPRODUCE.md` §1-§4 装环境、下数据、生成 json + metric cache。
+**不需要重跑 mining** —— 8190 场景的 delta 已存于 `artifacts/v11/mining/`（2.6 GPU-hours）。
+
+**v12 = kl_beta 扫描**（v11 归因指向的唯一「只涨不跌」knob）：
+
+```bash
+# 1. 复用已有 mining 结果重建场景表（秒级，无需 GPU）
+python scripts/build_v11_scene_list.py \
+    --mine-glob 'artifacts/v11/mining/mine_shard*.jsonl' \
+    --out results/mining_v12/scenes_hard50.txt \
+    --n-total 512 --hard-frac 0.5 --hard-repeat 2
+
+# 2. 从 hard50_kl 续训，扫 kl 0.03/0.05/0.08（4 卡 4 臂，约 1.9h）
+#    改 run_v11_hardmine_4gpu.sh：
+#      INIT_CKPT=release_ckpt/v11_hard50_kl     # 从当前最佳续训
+#      四臂 --kl-beta 分别 0.03 / 0.05 / 0.08 / 0.02(对照)
+#    其余参数保持不变（value baseline + floor + max_kr 0.85 + st_topk tau 0.1）
+
+# 3. gate（4 卡分 2 波，约 3.7h/波）→ 选 winner → full（约 3.7h）
+EVAL_WORKERS=1 EVAL_GPUS="0 1 2 3" bash scripts/eval_v7_folds_4gpu.sh <CYCLE> gate <arms>
+EVAL_WORKERS=1 EVAL_GPUS="0 1 2 3" bash scripts/eval_v7_folds_4gpu.sh <CYCLE> full <winner>
+```
+
+**判据**：full 4-shard > 0.898845 才算反超。gate 只用于筛选，**不得据 gate 或训练 reward 下结论**
+（v9/v11 已两次实锤 gate 乐观；hard50 gate 最高但 full 输给 hard50_kl）。
+
+若 kl 扫描收益饱和，转「条件化 kr」（见下方 v12 建议方向 2）。
 
 ## 不可更改的总目标
 
@@ -140,14 +172,27 @@ v11 已把差距压到 -0.000126（噪声量级）。瓶颈是**正则强度**�
 - ⚠️ **本节点仅 4 张 H20**：gate 8 job 分 2 波，单波约 3.7h；full 单臂约 3.7h。
 - ⚠️ **sh2 是唯一短板**：两 arm 的 sh2 均 0.893 左右，其余 shard 都已超 SOTA。
 
-## 关键路径
+## 关键路径（⚠️ 节点已回收，以下为**仓库内**路径，本地绝对路径已失效）
 
-- **v11 全流程（无人值守）**：`scripts/orchestrate_v11_pipeline.sh`
-- mining：`scripts/run_v11_mining_4gpu.sh [n_scenes]` → `results/mining_20260826_v11/mine_shard*.jsonl`
-- 组装：`scripts/build_v11_scene_list.py --hard-frac 0.5 --hard-repeat 2`
-- 训练（v11）：`scripts/run_v11_hardmine_4gpu.sh <list50> <list75> [round]`（CYCLE_ID=`20260826_v11r1`）
+- **复现全流程**：`docs/REPRODUCE.md`（每步附验证命令，已实测跑通）
+- **环境**：`requirements.txt` + `env.example.sh`（cp 成 env.sh 后 source）
+- **AutoVLA 侧改动**：`autovla_overlay/`（patch + 配置；AutoVLA 是学术许可的嵌套仓库，未随库分发）
+- **训练好的权重**：`release_ckpt/`（10 个，58MB；最佳 = `v11_hard50_kl`）
+- **mining 结果（v12 直接复用，省 2.6 GPU-hours）**：`artifacts/v11/mining/`（8190 场景）
+- **评估原始 CSV**：`artifacts/v11/eval_full/`、`artifacts/v11/eval_gate/`
+- mining 脚本：`scripts/run_v11_mining_4gpu.sh [n_scenes]`
+- 组装场景表：`scripts/build_v11_scene_list.py --hard-frac 0.5 --hard-repeat 2`
+- 训练：`scripts/run_v11_hardmine_4gpu.sh <list50> <list75> [round]`
 - 评估：`EVAL_WORKERS=1 EVAL_GPUS="0 1 2 3" bash scripts/eval_v7_folds_4gpu.sh <CYCLE_ID> [gate|full] [arms...]`
 - 训练核心：`scripts/train_scorer_budget_rl.py`（`--mine-mode` / `--scene-list` / `--init-budget-ckpt`）
-- 效率：`scripts/compute_flops_table.py`（可用）、`scripts/profile_wallclock.py --budget-ckpt <dir>`（待修）
-- ckpt（v11）：`ckpt/v7_surrogate_20260826_v11r1/{hard50,hard50_lr,hard75,hard50_kl}/checkpoint.pt`
-- CSV（v11）：`results/raw/v7_surrogate_20260826_v11r1_{gate,full}/`
+- 无人值守流水线：`scripts/orchestrate_v11_pipeline.sh`
+- 效率：`scripts/compute_flops_table.py`（可用）、`scripts/profile_wallclock.py`（**待修**）
+
+⚠️ `scripts/*.sh` 均硬编码原节点绝对路径（`/apdcephfs/private_shayladeng/...`），
+新机器需逐个改 header 前 ~15 行。详见 `docs/REPRODUCE.md` 开头三条警告。
+
+## GitHub
+
+- 主仓库：`Yanyeoo/RL-Drive-Pruning`（本项目，HEAD 已含全部产物）
+- 前序仓库：`Yanyeoo/RL-Drive`（legacy ReCogDrive 线，已 freeze，无待提交）
+- 未上传（有意）：140G 第三方预训练模型（AutoVLA/Qwen/ImpromptuVLA，官方 HF 已有）、606G 数据集

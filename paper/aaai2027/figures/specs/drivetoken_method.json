@@ -1,0 +1,71 @@
+{
+  "title": "DriveToken: Driving-Aware Token Pruning with Dynamic Budget Learning",
+  "canvas": {"width": 1600, "height": 940},
+  "style": {
+    "font_family": "Arial, Helvetica, sans-serif",
+    "font_size": 16,
+    "bg_color": "#FFFFFF",
+    "palette": ["#DCEBFA", "#DDF4EF", "#FDE7DE", "#EEE6FA", "#FFF2CC"]
+  },
+  "labels": [
+    {"text": "DriveToken: Driving-Aware Token Pruning with Dynamic Budget Learning", "x": 800, "y": 42, "font_size": 28, "color": "#17365D", "anchor": "middle"},
+    {"text": "A plug-and-play interface module for frozen Vision-Language-Action models", "x": 800, "y": 70, "font_size": 16, "color": "#5E6B7A", "anchor": "middle"},
+    {"text": "FROZEN VLA BACKBONE", "x": 158, "y": 118, "font_size": 15, "color": "#17365D", "anchor": "middle"},
+    {"text": "DRIVETOKEN MODULE", "x": 778, "y": 118, "font_size": 15, "color": "#0B655E", "anchor": "middle"},
+    {"text": "CLOSED-LOOP DRIVING OBJECTIVE", "x": 1372, "y": 118, "font_size": 15, "color": "#8C3B25", "anchor": "middle"},
+    {"text": "Stage 1 learns WHICH tokens matter; Stage 2 learns HOW MANY each scene needs.", "x": 800, "y": 885, "font_size": 17, "color": "#29465B", "anchor": "middle"}
+  ],
+  "nodes": [
+    {"id": "cams", "label": "3 surround-view cameras", "sublabel": "Front · Front-Left · Front-Right", "x": 155, "y": 220, "width": 235, "height": 78, "shape": "rounded", "fill": "#DCEBFA", "stroke": "#477EAF", "font_size": 17},
+    {"id": "instruction", "label": "Driving instruction q", "sublabel": "e.g., Turn right safely", "x": 155, "y": 352, "width": 235, "height": 70, "shape": "rounded", "fill": "#FFF2CC", "stroke": "#B68A1C", "font_size": 17},
+    {"id": "vit", "label": "ViT Encoder", "sublabel": "frozen", "x": 415, "y": 220, "width": 180, "height": 72, "shape": "rounded", "fill": "#DCEBFA", "stroke": "#477EAF", "font_size": 18},
+    {"id": "tokens", "label": "720 Vision Tokens", "sublabel": "3 cameras × 240 tokens", "x": 620, "y": 220, "width": 210, "height": 76, "shape": "rounded", "fill": "#DDF4EF", "stroke": "#29978C", "font_size": 18},
+    {"id": "cameraid", "label": "+ Camera ID", "sublabel": "3-dim view encoding", "x": 600, "y": 386, "width": 190, "height": 64, "shape": "rounded", "fill": "#EEE6FA", "stroke": "#8367B5", "font_size": 17},
+    {"id": "teacher", "label": "Layer-12 Attention", "sublabel": "frozen teacher signal", "x": 503, "y": 486, "width": 205, "height": 72, "shape": "rounded", "fill": "#FFF2CC", "stroke": "#B68A1C", "font_size": 17},
+    {"id": "rankloss", "label": "LambdaRank", "sublabel": "ordering supervision", "x": 708, "y": 486, "width": 180, "height": 72, "shape": "rounded", "fill": "#FFF2CC", "stroke": "#B68A1C", "font_size": 17},
+    {"id": "scorer", "label": "Token Scorer fθ", "sublabel": "0.6M MLP · fθ(xᵢ) → score", "x": 850, "y": 292, "width": 240, "height": 84, "shape": "rounded", "fill": "#DDF4EF", "stroke": "#16857B", "font_size": 19},
+    {"id": "ranked", "label": "Ranked Tokens", "sublabel": "high importance → low importance", "x": 1090, "y": 292, "width": 200, "height": 84, "shape": "rounded", "fill": "#FDE7DE", "stroke": "#CA725B", "font_size": 18},
+    {"id": "pool", "label": "Mean Pool", "sublabel": "scene representation", "x": 760, "y": 626, "width": 170, "height": 68, "shape": "rounded", "fill": "#EEE6FA", "stroke": "#8367B5", "font_size": 17},
+    {"id": "budget", "label": "Budget Head gφ", "sublabel": "Gaussian policy z ∼ N(μ, σ²)", "x": 980, "y": 626, "width": 225, "height": 76, "shape": "rounded", "fill": "#EEE6FA", "stroke": "#6E50A5", "font_size": 18},
+    {"id": "ratio", "label": "Dynamic keep ratio k", "sublabel": "k = 0.2 + 0.7σ(z)  ∈ [0.2, 0.9]", "x": 1225, "y": 626, "width": 240, "height": 78, "shape": "rounded", "fill": "#FDE7DE", "stroke": "#CA725B", "font_size": 18},
+    {"id": "topk", "label": "Top-K + True Token Drop", "sublabel": "K = floor(kN) · physically shorten KV sequence", "x": 1310, "y": 292, "width": 240, "height": 86, "shape": "rounded", "fill": "#FDE7DE", "stroke": "#B9533C", "font_size": 18},
+    {"id": "decoder", "label": "LLM Decoder", "sublabel": "frozen · reduced token sequence", "x": 1510, "y": 352, "width": 160, "height": 76, "shape": "rounded", "fill": "#DCEBFA", "stroke": "#477EAF", "font_size": 18},
+    {"id": "action", "label": "Driving Action a", "sublabel": "trajectory / control", "x": 1438, "y": 494, "width": 210, "height": 72, "shape": "rounded", "fill": "#DCEBFA", "stroke": "#477EAF", "font_size": 18},
+    {"id": "reward", "label": "Driving Reward R", "sublabel": "weighted submetric Δ + efficiency bonus (1 − k)", "x": 1440, "y": 790, "width": 280, "height": 84, "shape": "rounded", "fill": "#FFF2CC", "stroke": "#B68A1C", "font_size": 17},
+    {"id": "safety", "label": "Safety-aware quality", "sublabel": "collision · drivable · TTC · progress · direction · comfort", "x": 1150, "y": 800, "width": 260, "height": 78, "shape": "rounded", "fill": "#FFF2CC", "stroke": "#B68A1C", "font_size": 15},
+    {"id": "easy", "label": "Easy cruise", "sublabel": "low k · prune aggressively", "x": 500, "y": 782, "width": 180, "height": 70, "shape": "rounded", "fill": "#EAF7F3", "stroke": "#29978C", "font_size": 16},
+    {"id": "busy", "label": "Busy intersection", "sublabel": "medium k", "x": 705, "y": 782, "width": 180, "height": 70, "shape": "rounded", "fill": "#F6EFFC", "stroke": "#8367B5", "font_size": 16},
+    {"id": "critical", "label": "Safety-critical", "sublabel": "high k · preserve capacity", "x": 905, "y": 782, "width": 180, "height": 70, "shape": "rounded", "fill": "#FDF0EA", "stroke": "#CA725B", "font_size": 16}
+  ],
+  "edges": [
+    {"from": "cams", "to": "vit", "color": "#477EAF", "thickness": 3},
+    {"from": "vit", "to": "tokens", "color": "#477EAF", "thickness": 3},
+    {"from": "tokens", "to": "scorer", "label": "token features", "color": "#16857B", "thickness": 3},
+    {"from": "cameraid", "to": "scorer", "color": "#8367B5", "thickness": 2},
+    {"from": "tokens", "to": "teacher", "color": "#B68A1C", "thickness": 2, "style": "dashed"},
+    {"from": "teacher", "to": "rankloss", "color": "#B68A1C", "thickness": 2},
+    {"from": "rankloss", "to": "scorer", "label": "Stage 1 distillation", "color": "#B68A1C", "thickness": 2, "style": "dashed", "curve": true},
+    {"from": "scorer", "to": "ranked", "label": "importance scores", "color": "#16857B", "thickness": 3},
+    {"from": "ranked", "to": "topk", "color": "#B9533C", "thickness": 3},
+    {"from": "tokens", "to": "pool", "color": "#8367B5", "thickness": 2, "style": "dashed", "curve": true},
+    {"from": "pool", "to": "budget", "color": "#6E50A5", "thickness": 3},
+    {"from": "budget", "to": "ratio", "label": "Stage 2 policy", "color": "#6E50A5", "thickness": 3},
+    {"from": "ratio", "to": "topk", "label": "scene-adaptive K", "color": "#B9533C", "thickness": 3, "curve": true},
+    {"from": "instruction", "to": "decoder", "label": "q", "color": "#B68A1C", "thickness": 2, "curve": true},
+    {"from": "topk", "to": "decoder", "color": "#477EAF", "thickness": 3},
+    {"from": "decoder", "to": "action", "color": "#477EAF", "thickness": 3},
+    {"from": "action", "to": "reward", "label": "evaluate", "color": "#B68A1C", "thickness": 3},
+    {"from": "safety", "to": "reward", "color": "#B68A1C", "thickness": 2},
+    {"from": "reward", "to": "budget", "label": "REINFORCE + group-normalized advantage", "color": "#6E50A5", "thickness": 3, "style": "dashed", "curve": true},
+    {"from": "ratio", "to": "easy", "color": "#29978C", "thickness": 2, "style": "dotted"},
+    {"from": "ratio", "to": "busy", "color": "#8367B5", "thickness": 2, "style": "dotted"},
+    {"from": "ratio", "to": "critical", "color": "#CA725B", "thickness": 2, "style": "dotted"}
+  ],
+  "groups": [
+    {"id": "backbone", "label": "Frozen VLA Backbone", "node_ids": ["cams", "instruction", "vit", "tokens", "decoder", "action"], "fill": "#F6FAFE", "stroke": "#A9C8E5", "padding": 24},
+    {"id": "stage1", "label": "Stage 1 · Driving-aware token ranking", "node_ids": ["cameraid", "teacher", "rankloss", "scorer", "ranked"], "fill": "#F4FCFA", "stroke": "#9FD7CF", "padding": 24},
+    {"id": "stage2", "label": "Stage 2 · Dynamic budget learning (core novelty)", "node_ids": ["pool", "budget", "ratio", "easy", "busy", "critical"], "fill": "#FBF8FE", "stroke": "#C9B7E8", "padding": 24},
+    {"id": "objective", "label": "Closed-loop driving supervision", "node_ids": ["safety", "reward"], "fill": "#FFFCF1", "stroke": "#E5CA74", "padding": 24},
+    {"id": "drop", "label": "Variant B · actual speedup", "node_ids": ["topk"], "fill": "#FFF8F5", "stroke": "#E3A18F", "padding": 18}
+  ]
+}

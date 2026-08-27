@@ -1,0 +1,11 @@
+{
+  "spec": "s3_token_scorer_spec_v1",
+  "n_scenes": 4000,
+  "n_train": 3200,
+  "best_val_pairwise_acc": 0.8387712915899594,
+  "test_pairwise_acc": 0.8388213787151648,
+  "test_ndcg@360": 0.8744583129882812,
+  "seed": 42,
+  "epochs_run": 20,
+  "features": "layer0_emb+cam_onehot"
+}

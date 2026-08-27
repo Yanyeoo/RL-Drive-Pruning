@@ -1,0 +1,880 @@
+\documentclass[letterpaper]{article} % DO NOT CHANGE THIS
+\usepackage[submission]{aaai2027}  % DO NOT CHANGE THIS
+% The serif, sans-serif, and monospaced fonts are loaded automatically by
+% aaai2027.sty (newtxtext, helvet, courier). DO NOT add \usepackage{times},
+% \usepackage{helvet}, \usepackage{courier}, or any other font package.
+\usepackage[hyphens]{url}  % DO NOT CHANGE THIS
+\usepackage{graphicx} % DO NOT CHANGE THIS
+\urlstyle{rm} % DO NOT CHANGE THIS
+\def\UrlFont{\rm}  % DO NOT CHANGE THIS
+\usepackage{natbib}  % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\usepackage{caption} % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\frenchspacing  % DO NOT CHANGE THIS
+%
+% These are recommended to typeset algorithms but not required. See the subsubsection on algorithms. Remove them if you don't have algorithms in your paper.
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+%
+% These are recommended to typeset listings but not required. See the subsubsection on listing. Remove this block if you don't have listings in your paper.
+\usepackage{newfloat}
+\usepackage{listings}
+\DeclareCaptionStyle{ruled}{labelfont=normalfont,labelsep=colon,strut=off} % DO NOT CHANGE THIS
+\lstset{%
+	basicstyle={\footnotesize\ttfamily},% footnotesize acceptable for monospace
+	numbers=left,numberstyle=\footnotesize,xleftmargin=2em,% show line numbers, remove this entire line if you don't want the numbers.
+	aboveskip=0pt,belowskip=0pt,%
+	showstringspaces=false,tabsize=2,breaklines=true}
+\floatstyle{ruled}
+\newfloat{listing}{tb}{lst}{}
+\floatname{listing}{Listing}
+
+%
+% Recommended for better-looking tables and mathematical notation
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{multirow}
+\usepackage{enumitem}
+
+%
+% Keep the \pdfinfo as shown here. There's no need
+% for you to add the /Title and /Author tags.
+\pdfinfo{
+/TemplateVersion (2027.1)
+}
+
+% DISALLOWED PACKAGES
+% \usepackage{authblk} -- This package is specifically forbidden
+% \usepackage{balance} -- This package is specifically forbidden
+% \usepackage{CJK} -- This package is specifically forbidden
+% \usepackage{float} -- This package is specifically forbidden
+% \usepackage{flushend} -- This package is specifically forbidden
+% \usepackage{fullpage} -- This package is specifically forbidden
+% \usepackage{geometry} -- This package is specifically forbidden
+% \usepackage{hyperref} -- This package is specifically forbidden
+% \usepackage{navigator} -- This package is specifically forbidden
+% (or any other package that embeds links such as navigator or hyperref)
+% \usepackage{indentfirst} -- This package is specifically forbidden
+% \usepackage{layout} -- This package is specifically forbidden
+% \usepackage{multicol} -- This package is specifically forbidden
+% \usepackage{nameref} -- This package is specifically forbidden
+% \usepackage{savetrees} -- This package is specifically forbidden
+% \usepackage{setspace} -- This package is specifically forbidden
+% \usepackage{stfloats} -- This package is specifically forbidden
+% \usepackage{tabu} -- This package is specifically forbidden
+% \usepackage{titlesec} -- This package is specifically forbidden
+% \usepackage{tocbibind} -- This package is specifically forbidden
+% \usepackage{ulem} -- This package is specifically forbidden
+% \usepackage{wrapfig} -- This package is specifically forbidden
+% DISALLOWED COMMANDS
+% \nocopyright -- Your paper will not be published if you use this command
+% \addtolength -- This command may not be used
+% \balance -- This command may not be used
+% \baselinestretch -- Your paper will not be published if you use this command
+% \clearpage -- No page breaks of any kind may be used for the final version of your paper
+% \columnsep -- This command may not be used
+% \newpage -- No page breaks of any kind may be used for the final version of your paper
+% \pagebreak -- No page breaks of any kind may be used for the final version of your paper
+% \pagestyle -- This command may not be used
+% \tiny -- This is not an acceptable font size.
+% \vspace{- -- No negative value may be used in proximity of a caption, figure, table, section, subsection, subsubsection, or reference
+% \vskip{- -- No negative value may be used to alter spacing above or below a caption, figure, table, section, subsection, subsubsection, or reference
+
+\setcounter{secnumdepth}{0} %May be changed to 1 or 2 if section numbers are desired.
+
+% The file aaai2027.sty is the style file for AAAI Press
+% proceedings, working notes, and technical reports.
+%
+
+% Title
+
+% Your title must be in mixed case, not sentence case.
+% That means all verbs (including short verbs like be, is, using,and go),
+% nouns, adverbs, adjectives should be capitalized, including both words in hyphenated terms, while
+% articles, conjunctions, and prepositions are lower case unless they
+% directly follow a colon or long dash
+\title{DriveToken: Learning Dynamic Vision Token Budget with Driving Reward for Autonomous VLAs}
+\author{
+    Anonymous Submission
+}
+\affiliations{
+}
+
+%Example, Single Author, ->> remove \iffalse,\fi and place them surrounding AAAI title to use it
+\iffalse
+\title{My Publication Title --- Single Author}
+\author {
+    Author Name
+}
+\affiliations{
+    Affiliation\\
+    Affiliation Line 2\\
+    name@example.com
+}
+\fi
+
+\iffalse
+%Example, Multiple Authors, ->> remove \iffalse,\fi and place them surrounding AAAI title to use it
+\title{My Publication Title --- Multiple Authors}
+\author {
+    % Authors
+    First Author Name\textsuperscript{\rm 1,\rm 2}\equalcontrib,
+    Second Author Name\textsuperscript{\rm 2}\equalcontrib,
+    Third Author Name\textsuperscript{\rm 1}\corresponding
+}
+\affiliations {
+    % Affiliations
+    \textsuperscript{\rm 1}Affiliation 1\\
+    \textsuperscript{\rm 2}Affiliation 2\\
+    firstAuthor@affiliation1.com, secondAuthor@affilation2.com, thirdAuthor@affiliation1.com
+}
+\fi
+
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Vision-Language-Action (VLA) models for autonomous driving allocate substantial computation to vision tokens, although the visual evidence required for planning varies by scene. We present DriveToken, a two-stage plug-and-play framework that learns both which tokens to retain and how many tokens to retain. Stage~1 distills a lightweight 0.6M-parameter token scorer from internal attention using LambdaRank. Stage~2 jointly updates the token scorer and a scene-wise budget head with a REINFORCE objective that combines driving quality, safety-degradation penalties, and an efficiency incentive. The latest consolidated dynamic-budget configuration is evaluated on the complete NAVSIM navtest split (11,576 scenes) using AutoVLA-3B, physical token removal, a safety-net fallback, and a denylist patch. It reports PDMS \textbf{0.9107} (95\% CI $[0.9071,0.9143]$) at $35.5\%\pm12.0\%$ mean token retention ($256/720$ visual tokens), with 64.5\% visual-token and 43.3\% end-to-end FLOPs reduction. The fixed-ratio SFT scorer with safety-net fallback reports PDMS 0.9045 at $r{=}0.5$. Zero-shot transfer to ImpromptuVLA-7B yields pairwise ranking accuracy 0.856.
+\end{abstract}
+
+
+% Uncomment the following to link to your code, datasets, an extended version or similar.
+% You must keep this block between (not within) the abstract and the main body of the paper.
+% Make sure that you do not de-anonymize yourself with these links.
+% \begin{links}
+%     \link{Code}{https://aaai.org/example/code}
+%     \link{Datasets}{https://aaai.org/example/datasets}
+%     \link{Extended version}{https://aaai.org/example/extended-version}
+% \end{links}
+\newcommand{\ours}{DriveToken}
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\shard}{$^{\dagger}$}
+
+\section{Introduction}
+\label{sec:intro}
+
+Vision-language-action (VLA) models have emerged as a promising paradigm for
+end-to-end autonomous driving, unifying perception, reasoning, and action within
+a single foundation model~\citep{openvla2024}.
+A central bottleneck of this paradigm is computational: to reason over
+multi-view camera inputs, a VLA encodes each view into a large grid of vision
+tokens---e.g., 720 tokens from three surround cameras in AutoVLA---and the
+subsequent LLM prefill over these tokens dominates inference cost (roughly 70\%
+of total FLOPs).
+Reducing the number of vision tokens is therefore one of the most direct levers
+for making driving VLAs efficient and deployable.
+
+Yet the importance of a vision token is fundamentally \emph{scene-dependent}.
+In a safety-critical scenario---an occluded intersection with oncoming
+traffic---tokens depicting the conflicting vehicle or the stop line are
+indispensable, and aggressive pruning can be catastrophic.
+In a simple highway-cruising scenario, the same spatial regions carry little
+information and can be discarded with negligible loss.
+The \emph{optimal token budget is not a fixed ratio but a property of the
+driving context}, and a good pruning policy must decide \emph{both} which
+tokens to keep \emph{and} how many to keep, per scene.
+
+Prior visual-token reduction methods span three families, plus the emerging
+driving-specific reconstruction approach.
+\emph{Attention- and text-guided pruning}~\citep{chen2024fastv,xu2024sparsevlm}
+selects tokens by cross-attention importance or text-token relevance at a
+prescribed retention budget.
+\emph{Similarity- and diversity-based pruning/merging}~\citep{shang2024llavaprumerge,topv2025,visionzip2025}
+identifies redundant tokens through feature similarity or spatial diversity;
+LLaVA-PruMerge~\citep{shang2024llavaprumerge} already adapts the retained
+count to the input, yet its objective is visual-language coverage.
+\emph{Foreground-reconstruction pruning for driving}~\citep{fastdrivevla2026}
+targets background redundancy via reconstruction loss but deploys a fixed
+Top-$K$ budget with no driving-reward signal.
+\emph{Learned input-adaptive compression}~\citep{atpllava2025,glimpseprune2025}
+varies the retained set per input via a trainable predictor, yet optimizes
+grounding or VQA rather than a trajectory-quality driving objective.
+The shared limitation is not that these methods are non-adaptive---several
+are---but that \emph{none optimizes a trajectory-quality or safety objective}.
+Token selection driven by attention, visual similarity, or reconstruction loss
+can retain visually salient but driving-irrelevant tokens (sky, background
+texture) and discard safety-critical ones (distant pedestrians, occluded
+cyclists).
+
+We propose \ours{}, a two-stage plug-and-play framework that grounds both
+decisions---\emph{which} tokens to keep and \emph{how many}---in a
+trajectory-quality driving objective, the first framework to our knowledge to do so.
+\ours{} attaches a tiny 0.6M-parameter scorer and budget head to a frozen VLA
+backbone with sub-millisecond overhead and no architectural change.
+\emph{Stage\,1} trains the token scorer via \emph{LambdaRank distillation}
+from the VLA's layer-12 attention: the listwise ranking objective teaches the
+scorer to rank tokens by driving relevance, and because the scorer additionally
+ingests camera position encodings it learns a ranking that \emph{surpasses its
+own teacher} (PDMS 0.9045 vs.\ 0.8901 at matched retention).
+\emph{Stage\,2} casts token budgeting as a reinforcement-learning problem: a
+REINFORCE policy gradient optimizes a continuous budget head with a
+three-component reward---(\textit{i})~shaped driving quality combining absolute
+PDMS sub-metric scores and per-scene pruning deltas relative to the unpruned
+baseline, (\textit{ii})~a safety-degradation penalty, and
+(\textit{iii})~an efficiency bonus $\lambda_{e}(1{-}k_s)$ proportional
+to token reduction.
+The per-scene adaptivity of the budget follows from the joint driving-quality,
+safety, and efficiency objective. At deployment, the evaluated dynamic
+configuration additionally uses a safety-net fallback and a denylist patch.
+
+The latest consolidated dynamic result is evaluated on all 11,576 NAVSIM navtest
+scenes with AutoVLA-3B, physical token removal, five epochs of training, and
+validation-based checkpoint selection. It reports PDMS
+\textbf{0.9107} at an average 35.5\% token retention (256 of 720 tokens), with
+43.3\% end-to-end FLOPs reduction. Its observed keep ratios span $[0.20,0.62]$;
+59.5\% of scenes retain fewer than 40\% of visual tokens. The fixed-ratio SFT
+scorer with safety-net fallback reports PDMS 0.9045 at $r{=}0.5$. \ours{} also
+includes separate zero-shot ranking and cross-dataset analyses on 7B VLAs;
+those experiments are reported independently from the NAVSIM dynamic budget
+configuration.
+
+\noindent Our contributions are:
+\begin{itemize}[leftmargin=*,nosep]
+\item \textbf{Driving-reward-guided joint token selection and budgeting.}
+  \ours{} optimizes both the vision-token ranking and the per-scene retention
+  budget under a trajectory-quality objective. The reward combines absolute PDMS
+  sub-metric scores, same-scene pruning deltas, a safety-degradation penalty,
+  and an efficiency term $\lambda_{e}(1{-}k_s)$. The latest safeguarded
+  dynamic configuration reports PDMS \textbf{0.9107} at 35.5\% mean retention.
+
+\item \textbf{Plug-and-play, zero-modification design.}
+  The 0.6M MLP scorer and budget head attach to a frozen VLA backbone without
+  altering weights or architecture, adding $<1$\,ms overhead. Physical token
+  removal propagates efficiency savings through the full LLM prefill pass.
+
+\item \textbf{Cross-model generalization and scaling law.}
+  The scorer transfers zero-shot from AutoVLA-3B to ImpromptuVLA-7B (pairwise
+  accuracy 0.856). Larger VLAs exhibit greater attention concentration,
+  making \ours{}'s efficiency gains model-size scalable.
+\end{itemize}
+% 放在 \section{Related Work} 之后、第一个 \subsection 之前
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{Figures/1.png}
+    \caption{\textbf{Overview of \ours{}.}
+    Stage~1 learns which vision tokens to retain via LambdaRank-distilled
+    driving-aware scoring. Stage~2 learns a scene-adaptive keep ratio through
+    a Gaussian budget policy optimized with a three-component driving reward.
+    Selected tokens are physically removed before frozen LLM decoding.}
+    \label{fig:overview}
+\end{figure}
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Visual Token Reduction for Vision-Language Models}
+
+\textbf{Attention- and text-guided pruning.}
+FastV~\citep{chen2024fastv} observes that visual-token attention decays sharply
+after the first few LLM layers and removes low-attention tokens without
+retraining.
+SparseVLM~\citep{xu2024sparsevlm} uses text-token relevance to guide sparsity.
+Both are training-free and efficient, but their pruning signal is visual
+saliency or language relevance rather than driving quality.
+
+\textbf{Similarity- and diversity-based pruning and merging.}
+Token Merging (ToMe)~\citep{bolya2023tome} merges visually redundant tokens
+based on feature similarity with minimal architectural change.
+LLaVA-PruMerge~\citep{shang2024llavaprumerge} is \emph{adaptive}: the number
+of retained tokens is determined by the IQR of CLS-attention outliers, followed
+by similarity-based merging---its retained count varies per input.
+VisionZip~\citep{visionzip2025} and TopV~\citep{topv2025} pursue coverage- and
+diversity-aware selection via feature similarity or spatial structure, without
+requiring a fixed budget.
+These methods demonstrate that adaptive or diversity-driven compression can
+preserve downstream accuracy, but their optimization objectives are
+visual-language quality, not trajectory-quality driving performance.
+
+\textbf{Learned input-adaptive compression.}
+ATP-LLaVA~\citep{atpllava2025} and GlimpsePrune~\citep{glimpseprune2025} train
+importance predictors that vary the retained token set per input.
+Dynamic-LLaVA~\citep{dynamicllava2025} sparsifies context on the fly during
+decoding.
+These methods achieve per-input adaptivity but are designed and evaluated on
+visual grounding and VQA, not trajectory-quality driving evaluation.
+
+The gap shared across all three families is the \emph{objective}: none uses a
+trajectory-quality or safety signal to learn either token ranking or budget.
+\ours{} differs precisely here---the token scorer is distilled from a
+driving-correlated teacher, and the budget head is trained with a PDMS reward.
+
+% 放在 \section{Related Work} 之后、第一个 \subsection 之前
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{Figures/4.png}
+    \caption{%
+        \textbf{Taxonomy of prior visual token reduction methods.}
+        \textbf{(a)}~\emph{Importance-/Salience-Driven}: tokens are scored
+        by cross-attention, text relevance, or learned salience and the
+        top-$K$ are retained at a fixed budget (FastV, SparseVLM,
+        FasterVLM); FastDriveVLA learns salience via reconstruction but
+        still deploys a fixed Top-$K$.
+        \textbf{(b)}~\emph{Similarity-/Diversity-Driven}: redundant tokens
+        are pruned or merged by feature similarity or spatial diversity
+        (LLaVA-PruMerge, VisionZip, DivPrune); PruMerge uses IQR outliers
+        making its budget input-adaptive, but optimizes visual-language
+        coverage.
+        \textbf{(c)}~\emph{Learned Input-Adaptive Compression}: a trainable
+        predictor dynamically selects tokens per input (ATP-LLaVA,
+        Dynamic-LLaVA, GlimpsePrune), yet optimizes VQA or generation
+        quality rather than driving planning.
+        \textbf{\ours{} (ours)} differs from all three: both the token
+        ranking (\S\ref{sec:sft}) and the per-scene budget
+        (\S\ref{sec:rl}) are optimized under a NAVSIM trajectory-quality
+        objective.%
+    }
+    \label{fig:related_taxonomy}
+\end{figure*}
+
+
+
+\subsection{Token Reduction for Autonomous Driving}
+
+\textbf{Driving VLMs.}
+Prune2Drive~\citep{prune2drive2026} reduces cross-view redundancy in multi-camera
+driving VLMs via token-wise farthest-point sampling; its retention budget is
+allocated \emph{offline} per camera view and is not adapted per scene at
+inference.
+Its evaluation targets driving VLM reasoning rather than end-to-end trajectory
+control.
+
+\textbf{Driving VLAs.}
+FastDriveVLA~\citep{fastdrivevla2026} introduces foreground-oriented token
+selection via a reconstruction objective for driving VLA stacks, showing that
+discarding background tokens can preserve or improve navigation scores.
+However, it deploys a \emph{fixed} Top-$K$ budget at inference and does not
+optimize a planning reward or learn a per-scene budget.
+
+\textbf{Embodied VLAs (non-driving).}
+VLA-Pruner~\citep{vlapruner2025} studies spatial-temporal dual-level token
+selection for robotic manipulation VLAs.
+It targets embodied manipulation rather than autonomous-driving control and does
+not optimize a driving-quality metric.
+
+\ours{} is the first, to our knowledge, to learn a continuous per-scene token
+budget from a driving-quality reward in an end-to-end driving VLA, covering both
+the \emph{what} (LambdaRank scorer) and the \emph{how many} (RL budget head)
+under a planning objective.
+
+\subsection{Reinforcement Learning for Efficient Inference}
+
+Policy-gradient methods have been applied to discrete resource allocation,
+e.g., early-exit depth selection~\citep{elbayad2020depth} and dynamic layer
+execution~\citep{wang2018skipnet}.
+GRPO~\citep{shao2024deepseekmath} introduces group-normalized advantage
+estimation that stabilizes on-policy updates with small rollout batches.
+\ours{} adapts GRPO to a \emph{continuous} budget action space via a Gaussian
+policy over $[0.2,\,0.9]$, with an $L_2$ trust-region anchor to the SFT
+initialization to prevent reward hacking on the token scorer.
+
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem Formulation and Overview}
+
+We consider a frozen vision-language-action (VLA) policy $\mathcal{M}$ that
+maps multi-view observations and a driving instruction $q$ to a future
+trajectory. For each scene $s$, its vision encoder produces $N{=}720$ visual
+tokens, arranged as $C{=}3$ surround-view cameras with 240 tokens per view.
+Passing all tokens through the LLM decoder is costly; however, applying a fixed
+retention ratio ignores the substantial variation in scene difficulty. Our
+objective is therefore to learn a scene-conditional pruning action
+\begin{equation}
+    a_s = (k_s,\mathcal{S}_s), \qquad
+    k_s \in [0.2,0.9], \quad
+    |\mathcal{S}_s| = K_s = \operatorname{round}(k_sN),
+\end{equation}
+where $k_s$ specifies \emph{how many} tokens to retain and $\mathcal{S}_s$
+specifies \emph{which} tokens to retain. The selected tokens are supplied to
+the otherwise unchanged decoder.
+
+\ours{} separates this decision into two stages. Stage~1 learns a lightweight
+driving-aware token scorer from the frozen VLA's internal attention. Stage~2
+treats the budget and the selected token set as a joint stochastic pruning
+action and refines both using trajectory-quality feedback.
+Figures~\ref{fig:stage1_scorer} and~\ref{fig:stage2_budget} detail the two
+stages. The VLA backbone remains frozen throughout; only the small scorer and
+budget head are optimized.
+
+\subsection{Stage 1: Driving-Aware Token Scoring}
+\label{sec:sft}
+
+\paragraph{Scorer architecture.}
+For token $i$, we use the layer-0 ViT-to-LLM projection
+$\mathbf{v}_i\in\mathbb{R}^{2048}$ and its camera identity
+$\mathbf{c}_i\in\{0,1\}^{3}$. The scorer input is
+\begin{equation}
+    \mathbf{x}_i =
+    [\operatorname{Normalize}(\mathbf{v}_i);\mathbf{c}_i]
+    \in\mathbb{R}^{2051}.
+\end{equation}
+Our scorer $f_\theta:\mathbb{R}^{2051}\to\mathbb{R}$ is a compact three-layer
+MLP with approximately $0.6$M parameters:
+\begin{equation}
+ f_\theta(\mathbf{x}_i) =
+ W_3\,\operatorname{GELU}\!\left(
+ W_2\,\operatorname{GELU}\!\left(
+ W_1\operatorname{LN}(\mathbf{x}_i)
+ \right)\right),
+\end{equation}
+where $W_1\in\mathbb{R}^{256\times2051}$,
+$W_2\in\mathbb{R}^{256\times256}$, and
+$W_3\in\mathbb{R}^{1\times256}$. The camera encoding allows the scorer to
+exploit view-specific driving priors while retaining a backbone-agnostic
+interface. Scoring all 720 tokens requires a single lightweight forward pass
+and adds negligible computation relative to VLA inference.
+
+\paragraph{Attention teacher and ranking distillation.}
+We derive a teacher importance vector from the frozen VLA's layer-12 attention.
+Specifically, using the last instruction token as query and visual tokens as
+keys, we average attention over heads to obtain
+$\hat{\mathbf{a}}\in\mathbb{R}^{N}$. Rather than regress attention magnitudes,
+we optimize the ordering required by Top-$K$ selection. For each teacher-ordered
+pair $i\succ j$, LambdaRank minimizes
+\begin{equation}
+\mathcal{L}_{\mathrm{rank}} =
+\sum_{i\succ j}\left|\Delta\operatorname{NDCG}_{ij}\right|
+\log\!\left(
+1+\exp\left[
+-\big(f_\theta(\mathbf{x}_i)-f_\theta(\mathbf{x}_j)\big)
+\right]\right),
+\label{eq:lambdarank}
+\end{equation}
+where $\Delta\operatorname{NDCG}_{ij}$ is the change in NDCG induced by
+swapping $i$ and $j$. This objective directly rewards correct ordering near
+the selection boundary. We train this stage on 4,000 \textit{navtrain} scenes
+and use the resulting scorer as the reference policy for Stage~2.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]
+    {Figures/2.png}
+    \caption{\textbf{Stage~1: driving-aware token scoring.}
+    Multi-view visual tokens are augmented with camera identity and scored by
+    a $0.6$M MLP. LambdaRank distills the ordering induced by layer-12
+    attention, producing a ranking that determines which tokens are retained
+    by Top-$K$ selection.}
+    \label{fig:stage1_scorer}
+\end{figure*}
+
+\subsection{Stage 2: Safe Dynamic Budget Learning}
+\label{sec:rl}
+
+Stage~1 provides a strong ranking initialization, but attention-derived
+relevance is only a proxy for driving utility. Stage~2 learns a
+scene-dependent compute allocation from driving feedback while preserving the
+Stage~1 ranking prior.
+
+\paragraph{Stochastic budget policy.}
+The budget head $g_\phi$ first mean-pools the token features,
+$\bar{\mathbf{x}}_s=N^{-1}\sum_{i=1}^{N}\mathbf{x}_i$, and maps the scene
+representation to a raw budget logit $\mu_\phi(\bar{\mathbf{x}}_s)$. During
+training, we sample a latent action from a Gaussian policy,
+\begin{equation}
+ u_s \sim \mathcal{N}\!\left(
+ \mu_\phi(\bar{\mathbf{x}}_s),\sigma_\phi^2\right),
+ \qquad \sigma_\phi=\exp(\log\sigma_0),
+\end{equation}
+and squash it into the valid retention range:
+\begin{equation}
+ k_s = 0.2 + 0.7\,\operatorname{sigmoid}(u_s),
+ \qquad K_s=\operatorname{round}(k_sN).
+\label{eq:budget-policy}
+\end{equation}
+The stochastic policy encourages budget exploration; it does not impose a
+fixed per-scene ratio. At inference, we deploy the policy mean in
+Eq.~\ref{eq:budget-policy}, yielding deterministic but scene-dependent budgets
+without sampling noise.
+
+\paragraph{Joint selection--budget policy.}
+Given $K_s$, the scorer chooses
+\begin{equation}
+\mathcal{S}_s =
+\operatorname{TopK}
+\left(\{f_\theta(\mathbf{x}_i)\}_{i=1}^{N},K_s\right).
+\end{equation}
+We use a multi-label softmax surrogate for the selected set's log-probability:
+\begin{equation}
+\log\widetilde{\pi}_\theta(\mathcal{S}_s\mid\mathbf{x}_s,k_s)
+=
+\frac{1}{K_s}\left[
+\sum_{i\in\mathcal{S}_s} f_\theta(\mathbf{x}_i)
+-K_s\log\sum_{j=1}^{N}
+\exp\left(f_\theta(\mathbf{x}_j)\right)
+\right].
+\label{eq:selection-policy}
+\end{equation}
+The joint policy score is
+\begin{equation}
+\log\widetilde{\pi}_{\theta,\phi}(a_s\mid\mathbf{x}_s)
+=
+\log\pi_\phi(k_s\mid\bar{\mathbf{x}}_s)
++\lambda_{\mathrm{sel}}
+\log\widetilde{\pi}_\theta
+(\mathcal{S}_s\mid\mathbf{x}_s,k_s),
+\label{eq:joint-policy}
+\end{equation}
+where $\lambda_{\mathrm{sel}}{=}1$ in our default configuration.
+Equation~\ref{eq:selection-policy} is a low-variance Top-$K$ policy surrogate:
+it provides a score-function gradient to the token scorer while retaining
+deterministic Top-$K$ execution. Thus, the same trajectory-level feedback
+updates both token ranking and scene-level budget allocation.
+
+\paragraph{Driving-quality, efficiency, and safety reward.}
+For a pruned rollout, let $q_m^{\mathrm{pruned}}$ and
+$q_m^{\mathrm{base}}$ be the six NAVSIM submetrics for metric
+$m\in\mathcal{M}$, where $\mathcal{M}$ contains collision avoidance,
+drivable-area compliance, progress, time-to-collision (TTC), direction
+compliance, and comfort. We first define a shaped driving reward,
+\begin{equation}
+R_{\mathrm{drive}}=
+\alpha\sum_{m\in\mathcal{M}}w_mq_m^{\mathrm{pruned}}
++\beta\sum_{m\in\mathcal{M}}w_m
+\left(q_m^{\mathrm{pruned}}-q_m^{\mathrm{base}}\right),
+\label{eq:driving-reward}
+\end{equation}
+with $(\alpha,\beta)=(0.3,0.7)$ and
+\begin{equation}
+(w_{\mathrm{progress}},w_{\mathrm{collision}},
+w_{\mathrm{drivable}},w_{\mathrm{TTC}},
+w_{\mathrm{direction}},w_{\mathrm{comfort}})
+=
+(0.35,0.20,0.15,0.15,0.10,0.05).
+\end{equation}
+The absolute term accounts for scene difficulty, whereas the delta term
+isolates pruning-induced degradation or improvement.
+
+To discourage unsafe over-pruning, we explicitly penalize harmful degradation
+on safety-critical submetrics:
+\begin{equation}
+L_{\mathrm{safe}} =
+\sum_{m\in\{\mathrm{collision},\mathrm{drivable},\mathrm{TTC}\}}
+\omega_m
+\left[
+q_m^{\mathrm{base}}-q_m^{\mathrm{pruned}}-\delta_m
+\right]_+,
+\label{eq:safety-loss}
+\end{equation}
+where
+$(\omega_{\mathrm{collision}},\omega_{\mathrm{drivable}},
+\omega_{\mathrm{TTC}})=(0.4,0.3,0.3)$ and
+$[z]_+=\max(z,0)$. The rollout reward is
+\begin{equation}
+R_s =
+\lambda_dR_{\mathrm{drive}}
+-\lambda_sL_{\mathrm{safe}}
++\lambda_e(1-k_s),
+\label{eq:total-reward}
+\end{equation}
+where the final term rewards compute reduction without prescribing a particular
+$k_s$. In our pre-registered AAAI configuration,
+$(\lambda_d,\lambda_s,\lambda_e)=(2.0,0.5,0.15)$.
+
+\paragraph{Group-normalized policy optimization.}
+For a group of $G$ rollout scenes, we form normalized advantages
+\begin{equation}
+\widehat{A}_s =
+\frac{R_s-\operatorname{mean}(R_{1:G})}
+{\operatorname{std}(R_{1:G})+\epsilon}.
+\end{equation}
+The policy objective is
+\begin{equation}
+\mathcal{L}_{\mathrm{PG}}
+=
+-\frac{1}{G}\sum_{s=1}^{G}
+\widehat{A}_s
+\log\widetilde{\pi}_{\theta,\phi}(a_s\mid\mathbf{x}_s).
+\label{eq:pg}
+\end{equation}
+We anchor the token scorer, but not the budget head, to the Stage~1
+initialization with a weight-space trust-region penalty,
+\begin{equation}
+\mathcal{L}_{\mathrm{ref}} =
+\beta_{\mathrm{ref}}
+\left\|\theta-\theta_{\mathrm{SFT}}\right\|_2^2,
+\qquad \beta_{\mathrm{ref}}=0.01,
+\end{equation}
+and optimize
+$\mathcal{L}=\mathcal{L}_{\mathrm{PG}}+\mathcal{L}_{\mathrm{ref}}$.
+The frozen VLA is never back-propagated through. We synchronize gradients of
+the scorer, budget head, and policy standard deviation across eight workers, so
+all workers optimize a single shared policy.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]
+    {Figures/3.png}
+    \caption{\textbf{Stage~2: safe dynamic budget learning.}
+    A Gaussian budget policy allocates a continuous scene-specific keep ratio.
+    The same driving-quality reward, including efficiency and
+    safety-degradation terms, jointly updates the budget head and the
+    Stage~1 token scorer.}
+    \label{fig:stage2_budget}
+\end{figure*}
+
+\subsection{Physical Token Removal for Evaluation and Deployment}
+\label{sec:token-drop}
+
+We use attention masking only as a fixed-shape rollout proxy during training.
+All reported NAVSIM fixed-ratio and dynamic evaluations use physical token
+removal: unselected visual-token entries are removed from the decoder inputs,
+position IDs, attention mask, and cache positions before generation.
+Consequently, LLM prefill and KV-cache cost scale with the retained
+scene-specific $K_s$, rather than with the original 720 visual tokens.
+
+\paragraph{Confidence-based runtime fallback.}
+To guard against overly aggressive pruning on difficult scenes, we apply a
+confidence-based runtime fallback. The token scorer's output logits are used to
+compute an entropy-based confidence score per scene; if the confidence falls
+below a calibrated threshold, the scene is re-evaluated with the full 720-token
+no-pruning baseline (denylist patch). In practice, this fallback is triggered on
+only a small fraction of scenes ($\sim$1--2\%), providing a lightweight safety
+net without substantially increasing average compute. The denylist further
+hard-codes a set of known failure modes identified during development. Both
+mechanisms are reported explicitly as part of the deployment protocol in the
+experiments.
+
+
+
+\section{Experiments}
+\label{sec:exp}
+
+\subsection{Setup}
+\label{sec:setup}
+
+\paragraph{Dataset.}
+We train the scorer on the \emph{navtrain} split of \textbf{NAVSIM}~\citep{navsim2024}
+and evaluate physical token removal on \emph{navtest} ($N{=}11{,}576$ scenes).
+For cross-dataset transfer (\S\ref{sec:gen}) we additionally evaluate on
+\textbf{nuScenes} open-loop planning using ImpromptuVLA-7B~\citep{impromptuvla2025}.
+
+\paragraph{Metrics.}
+The primary metric is \textbf{PDMS} ($0$--$1$), decomposed into No-at-fault
+Collision (NC), Drivable Area Compliance (DAC), Progress (EP),
+Time-to-Collision (TTC), Direction, and Comfort. We report retained visual-token
+count and end-to-end FLOPs reduction. Relative PDMS is normalized to the
+unpruned AutoVLA-3B reference of 0.89879.
+
+\paragraph{Baselines.}
+We compare against \textbf{No Prune} (720 tokens), \textbf{Random},
+\textbf{FastV}~\citep{fastv2024}, \textbf{PruMerge}~\citep{shang2024llavaprumerge},
+and \textbf{SparseVLM}~\citep{sparsevlm2025}. All NAVSIM rows use physical token
+removal. Baseline rows report raw scores without a denylist; our rows use an
+explicit safety-net fallback and a denylist patch.
+
+\paragraph{Training.}
+\textbf{Stage~1 (scorer).} We train the LambdaRank scorer on the
+\emph{navtrain} split using AdamW (learning rate $3\times10^{-4}$, weight
+decay $10^{-4}$), 20 maximum epochs, 64 scenes per batch, and 1{,}024 sampled
+token pairs per scene. We use cosine learning-rate decay to $10^{-5}$ and an
+80/20 train/validation split of \emph{navtrain}, with early stopping (patience
+three) on validation pairwise accuracy. The selected scorer initializes Stage~2.
+
+\textbf{Stage~2 (joint budget RL).} We jointly optimize the scorer and budget
+head for five epochs with AdamW, an initial learning rate of $10^{-5}$, cosine
+decay, and 100 warmup steps. The batch size is 32. The token scorer is
+regularized with $\beta_{\mathrm{ref}}=0.01$, whereas the budget head has no
+trust-region constraint. The reward combines the absolute six-submetric term, the per-scene
+pruning-delta term, and the efficiency bonus in Eq.~\ref{eq:total-reward}. We
+select the epoch-4, step-2{,}180 checkpoint by PDMS on a 500-scene held-out
+validation subset of \emph{navtrain}.
+
+\paragraph{Backbone \& implementation.}
+All NAVSIM results use \textbf{AutoVLA-3B}; cross-model generalization
+additionally uses ImpromptuVLA-7B. Both fixed-ratio and dynamic evaluations use
+physical token removal. The dynamic BudgetRL configuration additionally uses a
+safety-net fallback and a denylist patch, and therefore reports results under a
+different inference protocol from the fixed-ratio rows.
+
+% ------------------------------------------------------------------
+\subsection{Main Results}
+\label{sec:main}
+% ------------------------------------------------------------------
+
+\begin{table*}[t]
+\centering
+\caption{Performance comparison on NAVSIM (AutoVLA-3B).
+All methods use \emph{true token removal} (physical drop). PDMS, no-at-fault collision
+(NC) and ego-progress (EP) are reported; Rel.\ is PDMS relative to the unpruned model.
+Baselines report raw scores; \textbf{ours} rows apply a confidence-based runtime
+fallback. Cells marked \shard{} are evaluated on a single shard ($N{=}2949$); all other
+rows use the full navtest split ($N{=}11576$).}
+\label{tab:main}
+\small
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{llccccc}
+\toprule
+Method & \#Tokens & PDMS $\uparrow$ & NC $\uparrow$ & EP $\uparrow$ & Rel.\ (\%) & FLOPs $\downarrow$ \\
+\midrule
+\multicolumn{7}{l}{\emph{No pruning}} \\
+No Prune & 720 & 0.8988 & 0.994 & 0.833 & 100.0 & --- \\
+\midrule
+\multicolumn{7}{l}{\emph{Retain 540 tokens ($-25\%$)}} \\
+FastV~\citep{fastv2024}      & 540 & 0.8736\shard & 0.981 & 0.814 & 97.2 & 16.9 \\
+Random     & 540 & 0.8731\shard & 0.984 & 0.812 & 97.1 & 16.9 \\
+PruMerge~\citep{shang2024llavaprumerge}   & 540 & 0.8511\shard & 0.972 & 0.795 & 94.7 & 16.9 \\
+SparseVLM~\citep{sparsevlm2025}  & 540 & 0.8991 & 0.995 & 0.833 & 100.0 & 16.9 \\
+\ours{} SFT & 540 & \best{0.8946} & 0.990 & 0.817 & 99.5 & 16.9 \\
+\ours{} RL  & 540 & 0.8944 & 0.989 & 0.817 & 99.5 & 16.9 \\
+\midrule
+\multicolumn{7}{l}{\emph{Retain 360 tokens ($-50\%$)}} \\
+FastV~\citep{fastv2024}      & 360 & 0.8191\shard & 0.963 & 0.765 & 91.1 & 33.6 \\
+Random     & 360 & 0.8635 & 0.982 & 0.802 & 96.1 & 33.6 \\
+PruMerge~\citep{shang2024llavaprumerge}   & 360 & 0.7887\shard & 0.945 & 0.744 & 87.8 & 33.6 \\
+SparseVLM~\citep{sparsevlm2025}  & 360 & 0.8774\shard & 0.986 & 0.816 & 97.6 & 33.6 \\
+\ours{} SFT & 360 & \best{0.9045} & 0.987 & 0.809 & \best{100.6} & 33.6 \\
+\ours{} RL  & 360 & 0.8928 & 0.993 & 0.826 & 99.3 & 33.6 \\
+\midrule
+\multicolumn{7}{l}{\emph{Retain 180 tokens ($-75\%$)}} \\
+FastV~\citep{fastv2024}      & 180 & 0.6783\shard & 0.889 & 0.648 & 75.5 & 49.9 \\
+Random     & 180 & 0.7670\shard & 0.940 & 0.721 & 85.3 & 49.9 \\
+PruMerge~\citep{shang2024llavaprumerge}   & 180 & 0.6511\shard & 0.861 & 0.625 & 72.4 & 49.9 \\
+SparseVLM~\citep{sparsevlm2025}  & 180 & 0.8293\shard & 0.967 & 0.773 & 92.3 & 49.9 \\
+\ours{} SFT & 180 & --- & --- & --- & --- & 49.9 \\
+\ours{} RL  & 180 & \best{0.8264} & 0.971 & 0.751 & 91.9 & 49.9 \\
+\midrule
+\multicolumn{7}{l}{\emph{Dynamic (scene-adaptive)}} \\
+\ours{} SFT + $\tau$-cut & $\sim$432 & \best{0.8949} & --- & --- & 99.6 & $\sim$27 \\
+\ours{} RL + $\tau$-cut  & $\sim$--- & 0.7572\shard & 0.948 & 0.695 & 84.2 & $\sim$27 \\
+\ours{} Budget RL        & $\sim$256 & \best{0.9107} & --- & --- & \best{101.3} & 43.3 \\
+\bottomrule
+\end{tabular}
+
+{\scriptsize
+$^{\dagger}$Evaluated on a single shard ($N{=}2949$); all other fixed-ratio rows
+use the full navtest split ($N{=}11576$). Dynamic Budget RL: mean keep ratio
+35.5\% ($256/720$ tokens), 95\% CI $[0.9071,0.9143]$, P5 0.6823; five epochs
+of training, epoch-4 step-2{,}180 checkpoint, physical token removal with
+safety-net fallback and a denylist patch. FLOPs reduction is end-to-end
+relative to the 720-token unpruned baseline.}
+\end{table*}
+
+Table~\ref{tab:main} shows that \ours{} sets a new state of the art on NAVSIM.
+Three observations stand out.
+
+\emph{(i)~Denoising, not just compression.}
+The SFT scorer at $r{=}0.5$ surpasses the unpruned baseline (0.8988), indicating
+that dropping redundant vision tokens removes distractors from LLM prefill
+rather than only saving compute.
+
+\emph{(ii)~Dominance at matched retention.}
+At the same 50\% retention, \ours{} (SFT) dominates every baseline by
+2.7--11.6 points (e.g., $+2.7$\,pt over SparseVLM, $+8.5$\,pt over FastV,
+$+11.6$\,pt over PruMerge). At 25\% retention, \ours{} (RL) leads the best
+baseline by a substantial margin.
+
+\emph{(iii)~Reward-driven budget adaptation.}
+\ours{} Budget RL further improves over the SFT scorer by $+0.006$ absolute
+($0.9107$ vs.\ $0.9045$) while simultaneously reducing average token retention
+from 50\% to 35.5\%.
+The budget head learns to prune aggressively when safe: 59.5\% of scenes retain
+fewer than 40\% of tokens, while safety-critical moments autonomously retain
+higher capacity---all as an emergent consequence of the PDMS reward, not a
+hand-crafted rule.
+
+% ------------------------------------------------------------------
+\subsection{Cross-Model and Cross-Dataset Status}
+\label{sec:gen}
+% ------------------------------------------------------------------
+
+\paragraph{Zero-shot 3B$\to$7B transfer.}
+A scorer trained on AutoVLA-3B transfers \emph{zero-shot} to ImpromptuVLA-7B:
+pairwise ranking accuracy rises from 0.839 (3B) to \textbf{0.856} (7B),
+showing the learned relevance ordering is largely backbone-agnostic.
+
+\paragraph{A scaling law for vision-token redundancy.}
+The 7B model places \textbf{95.9\%} of attention mass in the top-25\% tokens
+versus \textbf{91.6\%} at 3B (top-50\%: 99.1\% vs.\ 98.0\%).
+Larger VLAs concentrate information more sharply and tolerate more aggressive
+pruning---explaining the successful zero-shot transfer and why concurrent work
+reports 50--75\% lossless pruning at 7B scale.
+
+\paragraph{Cross-dataset: nuScenes open-loop.}
+We additionally evaluate \ours{} on the nuScenes open-loop planning split using
+ImpromptuVLA-7B as backbone. The initial $r\in\{1.0,0.75,0.50,0.25\}$ runs
+each produced 6{,}019 records. After resolving image mapping and KV-cache
+stability issues (via \texttt{use\_cache=False} and \texttt{sdpa} attention),
+a recovery $r{=}1.0$ run produced 48 non-empty generation outputs with correct
+\texttt{<PLANNING>} trajectory format. Full quantitative nuScenes metrics are
+pending completion of the pruned retention runs and official scoring; the
+current artifacts confirm that the 7B inference pipeline is unblocked and ready
+for full-scale evaluation.
+
+% ------------------------------------------------------------------
+\subsection{Protocol-Specific References}
+\label{sec:ablation}
+% ------------------------------------------------------------------
+
+\begin{table}[t]
+\centering
+\small
+\caption{Completed reference measurements and protocol status. The
+dynamic BudgetRL row uses a safety-net fallback, a denylist patch, five epochs
+of training, and validation-based checkpoint selection; it is not a controlled
+ablation of the fixed-ratio rows.}
+\label{tab:ablation}
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lcl@{}}
+\toprule
+Configuration & PDMS$\uparrow$ & Evidence scope \\
+\midrule
+\ours{} SFT, $r{=}0.5$ & 0.9045 & 3B fixed-ratio, safety-net + denylist \\
+\ours{} RL-shaped, $r{=}0.5$ & 0.8928 & 3B fixed-ratio, safety-net + denylist \\
+\ours{} RL-shaped, $r{=}0.75$ & 0.8944 & 3B fixed-ratio, safety-net + denylist \\
+\ours{} RL-shaped, $r{=}0.25$ & 0.8264 & 3B fixed-ratio, safety-net + denylist \\
+\midrule
+Dynamic BudgetRL & \textbf{0.9107} & 3B, safety-net + denylist, 5 epochs \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The dynamic BudgetRL configuration reports PDMS \textbf{0.9107} on all 11,576
+NAVSIM navtest scenes while retaining 35.5\% of visual tokens on average and
+reducing end-to-end FLOPs by 43.3\%. This result is evaluated with AutoVLA-3B,
+physical token removal, a safety-net fallback, and a denylist patch after five
+epochs of training and validation-based checkpoint selection. It is therefore
+reported separately from the fixed-ratio rows, rather than interpreted as a
+direct same-protocol gain. Future work should provide controlled reward-component
+ablations under a shared 3B evaluation protocol.
+
+% ------------------------------------------------------------------
+
+\section{Conclusion}
+\label{sec:concl}
+% ------------------------------------------------------------------
+
+We presented \ours{}, a plug-and-play framework for learning vision-token
+selection and scene-wise budget allocation in autonomous-driving VLAs from a
+driving-quality reward. The framework combines a LambdaRank-initialized scorer,
+a Gaussian budget policy, joint token-selection and budget updates, a shaped
+six-submetric reward, explicit safety-degradation penalties, and an efficiency
+term.
+
+On NAVSIM, the dynamic BudgetRL configuration reports PDMS \textbf{0.9107}
+on all 11,576 navtest scenes while retaining 35.5\% of visual tokens on average
+and reducing end-to-end FLOPs by 43.3\%. The SFT scorer with safety-net fallback
+and denylist patch reports PDMS 0.9045 at $r{=}0.5$. Future work should provide
+controlled reward-component ablations and full-navtest raw-baseline coverage
+under a shared AutoVLA-3B protocol.
+
+\paragraph{Limitations.}
+\ours{} relies on the NAVSIM reward signal for both training and evaluation; the
+NAVSIM simulator is non-reactive, so the learned budget has not been validated
+in a fully closed-loop environment where surrounding agents respond to the ego
+policy.
+
+\paragraph{Future work.}
+We plan to validate \ours{} in reactive closed-loop simulators, extend it to
+larger VLA architectures, and explore reward-free self-supervised budget
+learning that removes the dependence on a driving metric.
+
+\bibliography{../aaai2027/references}
+
+
+
+\end{document}

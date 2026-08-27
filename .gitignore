@@ -22,6 +22,16 @@ pretrained/
 *.npy
 *.npz
 
+# ---------- EXCEPTION: our own trained scorer weights (release artifacts) ----------
+# The token scorer + budget head is a 0.6M-param MLP: ~6.6MB per checkpoint.
+# These are OUR training products and are small enough to ship in-repo so that
+# `git clone` yields a directly usable model. Only the FINAL checkpoint of each
+# published arm is tracked (intermediate ckpt_step*/ckpt_best stay ignored).
+# Third-party pretrained backbones (AutoVLA / Qwen / ImpromptuVLA, 140GB) are
+# NOT redistributed here — download them from their official sources.
+!release_ckpt/
+!release_ckpt/**
+
 # ---------- experiment / log / result outputs ----------
 exp/**
 !exp/.gitkeep

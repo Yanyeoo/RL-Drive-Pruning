@@ -1,0 +1,18 @@
+{
+  "spec": "budget_rl_v6_per_token_counterfactual",
+  "method": "Per-token counterfactual REINFORCE + Gaussian budget; true PDMS reward; KL on token_net only",
+  "efficiency_beta": 0.005,
+  "safety_beta": 0.5,
+  "safety_margin": 0.0,
+  "driving_scale": 3.0,
+  "delta_reward": true,
+  "selection_pg_weight": 1.0,
+  "kl_beta": 0.01,
+  "budget_kl_beta": 0.0,
+  "min_keep_ratio": 0.35,
+  "max_keep_ratio": 0.7,
+  "counterfactual_k": 0,
+  "train_json_dir": "/apdcephfs/private_shayladeng/tokenrl_autoVLA/data/navtrain_nocot",
+  "train_metric_cache": "/apdcephfs/private_shayladeng/tokenrl_autoVLA/data/navtrain_metric_cache",
+  "tag": "final"
+}

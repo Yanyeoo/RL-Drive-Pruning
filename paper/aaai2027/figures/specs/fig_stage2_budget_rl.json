@@ -1,0 +1,51 @@
+{
+  "title": "DriveToken Stage 2: Dynamic Budget Learning",
+  "canvas": {"width": 1500, "height": 700},
+  "style": {"font_family": "Arial, Helvetica, sans-serif", "font_size": 16, "bg_color": "#FFFFFF", "palette": ["#EAF3FB", "#E6F5F0", "#FFF3D6", "#FDEBE5", "#F1EAFB"]},
+  "labels": [
+    {"text": "Stage 2: Dynamic Budget Learning (How Many Tokens to Keep)", "x": 750, "y": 42, "font_size": 27, "color": "#17365D", "anchor": "middle"},
+    {"text": "A continuous Gaussian budget policy allocates aggressive pruning to easy scenes and preserves capacity for safety-critical moments.", "x": 750, "y": 70, "font_size": 16, "color": "#526272", "anchor": "middle"},
+    {"text": "SCENE-ADAPTIVE BUDGET POLICY", "x": 710, "y": 122, "font_size": 15, "color": "#6B4B9B", "anchor": "middle"},
+    {"text": "CLOSED-LOOP REWARD", "x": 1270, "y": 122, "font_size": 15, "color": "#A45A25", "anchor": "middle"},
+    {"text": "Only gφ receives the policy gradient; fθ remains anchored to its Stage-1 ranking initialization.", "x": 750, "y": 664, "font_size": 15, "color": "#526272", "anchor": "middle"}
+  ],
+  "nodes": [
+    {"id": "tokens", "label": "Stage-1 scored tokens", "sublabel": "720 visual features + ranking fθ", "x": 155, "y": 248, "width": 255, "height": 78, "shape": "rounded", "fill": "#E6F5F0", "stroke": "#178579", "font_size": 18},
+    {"id": "pool", "label": "Mean pooling", "sublabel": "x̄ = 1/N Σᵢ xᵢ", "x": 405, "y": 248, "width": 200, "height": 78, "shape": "rounded", "fill": "#F1EAFB", "stroke": "#8869B5", "font_size": 18},
+    {"id": "head", "label": "Budget head gφ", "sublabel": "small MLP outputs μ(s)", "x": 630, "y": 248, "width": 220, "height": 78, "shape": "rounded", "fill": "#F1EAFB", "stroke": "#6E50A5", "font_size": 18},
+    {"id": "gaussian", "label": "Gaussian policy", "sublabel": "z ∼ N(μ(s), σ²)", "x": 850, "y": 248, "width": 200, "height": 78, "shape": "rounded", "fill": "#FDEBE5", "stroke": "#C76F55", "font_size": 18},
+    {"id": "squash", "label": "Sigmoid squash", "sublabel": "k = 0.2 + 0.7σ(z)", "x": 1070, "y": 248, "width": 220, "height": 78, "shape": "rounded", "fill": "#FDEBE5", "stroke": "#C76F55", "font_size": 18},
+    {"id": "ratio", "label": "Continuous keep ratio", "sublabel": "k ∈ [0.2, 0.9]", "x": 1292, "y": 248, "width": 200, "height": 78, "shape": "rounded", "fill": "#FFF3D6", "stroke": "#C08A18", "font_size": 18},
+    {"id": "easy", "label": "Easy cruising scene", "sublabel": "sampled k ≈ 0.25 · 180 tokens", "x": 470, "y": 450, "width": 240, "height": 80, "shape": "rounded", "fill": "#E6F5F0", "stroke": "#178579", "font_size": 17},
+    {"id": "busy", "label": "Busy intersection", "sublabel": "sampled k ≈ 0.55 · 396 tokens", "x": 735, "y": 450, "width": 240, "height": 80, "shape": "rounded", "fill": "#F1EAFB", "stroke": "#8869B5", "font_size": 17},
+    {"id": "critical", "label": "Safety-critical scene", "sublabel": "sampled k ≈ 0.85 · 612 tokens", "x": 1000, "y": 450, "width": 245, "height": 80, "shape": "rounded", "fill": "#FDEBE5", "stroke": "#C76F55", "font_size": 17},
+    {"id": "topk", "label": "Top-K true token drop", "sublabel": "physically remove 720 − K tokens", "x": 1270, "y": 450, "width": 240, "height": 80, "shape": "rounded", "fill": "#EAF3FB", "stroke": "#5089B7", "font_size": 17},
+    {"id": "vlm", "label": "Frozen VLA rollout", "sublabel": "shortened KV sequence → trajectory", "x": 1325, "y": 570, "width": 240, "height": 76, "shape": "rounded", "fill": "#EAF3FB", "stroke": "#5089B7", "font_size": 17},
+    {"id": "quality", "label": "Shaped driving quality Δ", "sublabel": "collision · drivable · TTC · progress · direction · comfort", "x": 1035, "y": 570, "width": 300, "height": 80, "shape": "rounded", "fill": "#FFF3D6", "stroke": "#C08A18", "font_size": 17},
+    {"id": "reward", "label": "Composite reward R", "sublabel": "λd · weighted submetric Δ + λe(1 − k)", "x": 735, "y": 570, "width": 280, "height": 80, "shape": "rounded", "fill": "#FFF3D6", "stroke": "#C08A18", "font_size": 18},
+    {"id": "grpo", "label": "Group-normalized advantage", "sublabel": "Â = (R − mean(RG)) / (std(RG) + ε)", "x": 405, "y": 570, "width": 310, "height": 80, "shape": "rounded", "fill": "#F1EAFB", "stroke": "#6E50A5", "font_size": 17},
+    {"id": "update", "label": "REINFORCE update", "sublabel": "−Â log πφ(k | x̄) → update gφ only", "x": 120, "y": 570, "width": 220, "height": 80, "shape": "rounded", "fill": "#FDEBE5", "stroke": "#C76F55", "font_size": 17}
+  ],
+  "edges": [
+    {"from": "tokens", "to": "pool", "color": "#178579", "thickness": 3},
+    {"from": "pool", "to": "head", "color": "#6E50A5", "thickness": 3},
+    {"from": "head", "to": "gaussian", "color": "#6E50A5", "thickness": 3},
+    {"from": "gaussian", "to": "squash", "label": "sample z", "color": "#C76F55", "thickness": 3},
+    {"from": "squash", "to": "ratio", "color": "#C76F55", "thickness": 3},
+    {"from": "ratio", "to": "easy", "color": "#178579", "thickness": 2, "style": "dotted", "curve": true},
+    {"from": "ratio", "to": "busy", "color": "#8869B5", "thickness": 2, "style": "dotted", "curve": true},
+    {"from": "ratio", "to": "critical", "color": "#C76F55", "thickness": 2, "style": "dotted", "curve": true},
+    {"from": "ratio", "to": "topk", "label": "K = floor(kN)", "color": "#5089B7", "thickness": 3, "curve": true},
+    {"from": "topk", "to": "vlm", "color": "#5089B7", "thickness": 3},
+    {"from": "vlm", "to": "quality", "label": "evaluate trajectory", "color": "#C08A18", "thickness": 3},
+    {"from": "quality", "to": "reward", "color": "#C08A18", "thickness": 3},
+    {"from": "reward", "to": "grpo", "color": "#6E50A5", "thickness": 3},
+    {"from": "grpo", "to": "update", "color": "#C76F55", "thickness": 3},
+    {"from": "update", "to": "head", "label": "policy gradient", "color": "#C76F55", "thickness": 3, "style": "dashed", "curve": true}
+  ],
+  "groups": [
+    {"id": "policy", "label": "Dynamic budget policy πφ", "node_ids": ["tokens", "pool", "head", "gaussian", "squash", "ratio"], "fill": "#FAF8FD", "stroke": "#C9B7E8", "padding": 23},
+    {"id": "adaptive", "label": "Scene-adaptive allocation", "node_ids": ["easy", "busy", "critical", "topk"], "fill": "#F7FCFB", "stroke": "#9FD8CF", "padding": 23},
+    {"id": "rl", "label": "Closed-loop driving reinforcement learning", "node_ids": ["vlm", "quality", "reward", "grpo", "update"], "fill": "#FFFDF5", "stroke": "#E3BF66", "padding": 23}
+  ]
+}

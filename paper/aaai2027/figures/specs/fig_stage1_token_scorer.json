@@ -1,0 +1,45 @@
+{
+  "title": "DriveToken Stage 1: Driving-Aware Token Scorer",
+  "canvas": {"width": 1500, "height": 700},
+  "style": {"font_family": "Arial, Helvetica, sans-serif", "font_size": 16, "bg_color": "#FFFFFF", "palette": ["#EAF3FB", "#E6F5F0", "#FFF3D6", "#FDEBE5", "#F1EAFB"]},
+  "labels": [
+    {"text": "Stage 1: Driving-Aware Token Scorer (Which Tokens to Keep)", "x": 750, "y": 42, "font_size": 27, "color": "#17365D", "anchor": "middle"},
+    {"text": "Frozen VLA attention supplies an ordering teacher; LambdaRank trains a lightweight scorer to select driving-relevant tokens.", "x": 750, "y": 70, "font_size": 16, "color": "#526272", "anchor": "middle"},
+    {"text": "TRAINING", "x": 742, "y": 122, "font_size": 15, "color": "#A45A25", "anchor": "middle"},
+    {"text": "INFERENCE", "x": 1268, "y": 122, "font_size": 15, "color": "#0B655E", "anchor": "middle"},
+    {"text": "Each colored cell is a vision token. Coral = retained; light gray = removed.", "x": 750, "y": 664, "font_size": 15, "color": "#526272", "anchor": "middle"}
+  ],
+  "nodes": [
+    {"id": "cams", "label": "Three camera views", "sublabel": "Front · Front-Left · Front-Right", "x": 135, "y": 248, "width": 220, "height": 76, "shape": "rounded", "fill": "#EAF3FB", "stroke": "#5089B7", "font_size": 18},
+    {"id": "vit", "label": "Frozen ViT → LLM projection", "sublabel": "Layer-0 token embeddings", "x": 370, "y": 248, "width": 235, "height": 76, "shape": "rounded", "fill": "#EAF3FB", "stroke": "#5089B7", "font_size": 17},
+    {"id": "features", "label": "720 token features", "sublabel": "vᵢ ∈ R²⁰⁴⁸ + camera one-hot cᵢ ∈ R³", "x": 620, "y": 248, "width": 265, "height": 82, "shape": "rounded", "fill": "#F1EAFB", "stroke": "#8869B5", "font_size": 17},
+    {"id": "attn", "label": "Layer-12 attention teacher", "sublabel": "last instruction token → 16-head average", "x": 545, "y": 430, "width": 270, "height": 80, "shape": "rounded", "fill": "#FFF3D6", "stroke": "#C08A18", "font_size": 17},
+    {"id": "ranktarget", "label": "Teacher ranking â", "sublabel": "720-dimensional importance ordering", "x": 830, "y": 430, "width": 230, "height": 78, "shape": "rounded", "fill": "#FFF3D6", "stroke": "#C08A18", "font_size": 17},
+    {"id": "lambdarank", "label": "LambdaRank loss", "sublabel": "ΔNDCG-weighted pairwise ordering", "x": 925, "y": 545, "width": 260, "height": 76, "shape": "rounded", "fill": "#FDEBE5", "stroke": "#C76F55", "font_size": 17},
+    {"id": "mlp", "label": "0.6M MLP scorer fθ", "sublabel": "LN → Linear(2051,256) → GELU → score", "x": 915, "y": 248, "width": 280, "height": 88, "shape": "rounded", "fill": "#E6F5F0", "stroke": "#178579", "font_size": 18},
+    {"id": "scores", "label": "Importance scores", "sublabel": "fθ(xᵢ): high → low", "x": 1170, "y": 248, "width": 195, "height": 76, "shape": "rounded", "fill": "#FDEBE5", "stroke": "#C76F55", "font_size": 18},
+    {"id": "topk", "label": "Top-K selection", "sublabel": "K = floor(kN)", "x": 1370, "y": 248, "width": 190, "height": 76, "shape": "rounded", "fill": "#E6F5F0", "stroke": "#178579", "font_size": 18},
+    {"id": "fullgrid", "label": "Full token grid", "sublabel": "3 views × 240 tokens", "x": 1138, "y": 430, "width": 220, "height": 85, "shape": "rounded", "fill": "#F7F9FB", "stroke": "#8092A3", "font_size": 18},
+    {"id": "keptgrid", "label": "Driving-aware kept tokens", "sublabel": "retain agents, lanes, near-field hazards", "x": 1365, "y": 430, "width": 230, "height": 85, "shape": "rounded", "fill": "#E6F5F0", "stroke": "#178579", "font_size": 18}
+  ],
+  "edges": [
+    {"from": "cams", "to": "vit", "color": "#5089B7", "thickness": 3},
+    {"from": "vit", "to": "features", "color": "#5089B7", "thickness": 3},
+    {"from": "features", "to": "mlp", "label": "[Normalize(vᵢ); cᵢ]", "color": "#178579", "thickness": 3},
+    {"from": "features", "to": "attn", "color": "#C08A18", "thickness": 2, "style": "dashed", "curve": true},
+    {"from": "attn", "to": "ranktarget", "label": "attention ordering", "color": "#C08A18", "thickness": 3},
+    {"from": "ranktarget", "to": "lambdarank", "color": "#C76F55", "thickness": 2},
+    {"from": "mlp", "to": "lambdarank", "label": "predicted scores", "color": "#C76F55", "thickness": 2, "style": "dashed", "curve": true},
+    {"from": "lambdarank", "to": "mlp", "label": "optimize fθ", "color": "#C76F55", "thickness": 3, "style": "dashed", "curve": true},
+    {"from": "mlp", "to": "scores", "color": "#178579", "thickness": 3},
+    {"from": "scores", "to": "topk", "color": "#178579", "thickness": 3},
+    {"from": "topk", "to": "fullgrid", "label": "rank 720 tokens", "color": "#526272", "thickness": 2, "style": "dotted", "curve": true},
+    {"from": "fullgrid", "to": "keptgrid", "label": "drop low-score tokens", "color": "#178579", "thickness": 3}
+  ],
+  "groups": [
+    {"id": "input", "label": "Frozen VLA token interface", "node_ids": ["cams", "vit", "features"], "fill": "#F7FBFE", "stroke": "#A8C9E2", "padding": 22},
+    {"id": "teacher", "label": "Attention distillation teacher", "node_ids": ["attn", "ranktarget"], "fill": "#FFFDF6", "stroke": "#E3BF66", "padding": 22},
+    {"id": "student", "label": "Learned scorer", "node_ids": ["mlp", "lambdarank"], "fill": "#F5FCFA", "stroke": "#9FD8CF", "padding": 22},
+    {"id": "select", "label": "Driving-aware selection", "node_ids": ["scores", "topk", "fullgrid", "keptgrid"], "fill": "#F7FCFB", "stroke": "#9FD8CF", "padding": 22}
+  ]
+}

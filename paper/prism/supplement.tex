@@ -1,0 +1,284 @@
+\documentclass[letterpaper]{article}
+\usepackage[submission]{aaai2027}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage[hyphens]{url}
+\urlstyle{rm}
+\def\UrlFont{\rm}
+
+\frenchspacing
+\setcounter{secnumdepth}{1}
+
+\begin{document}
+
+\title{Supplementary Material for ``DriveToken: Learning Dynamic Vision-Token Budgets from Driving Rewards for Autonomous VLAs''}
+
+\maketitle
+
+\section{Reproducibility Summary}
+
+This supplement provides architecture specifications, full training details, and
+extended results referenced in the main paper. All numbers are derived from the
+AutoVLA-3B backbone on NAVSIM navtest ($N{=}11{,}576$ scenes) unless stated
+otherwise. The confidence-based runtime fallback is an integral part of the
+DriveToken deployment pipeline and is reported explicitly throughout.
+
+% ============================================================================
+\section{Architecture Details}
+\label{sec:arch}
+% ============================================================================
+
+The token scorer $f_\theta$ is a three-layer MLP:
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Component & Specification \\
+\midrule
+Input dimension & $2051 = 2048$ (ViT-to-LLM embedding) $+ 3$ (camera one-hot) \\
+Layer 1 & LayerNorm(2051) $\to$ Linear(2051, 256) $\to$ GELU \\
+Layer 2 & Linear(256, 256) $\to$ GELU \\
+Layer 3 & Linear(256, 1) \\
+Output & Scalar importance score per token \\
+Total parameters & 0.59M \\
+\midrule
+Input feature & Standardized layer-0 ViT-to-LLM projection \\
+Camera encoding & 3-dimensional one-hot (front, left, right) \\
+Inference cost & $<1$\,ms per scene ($<0.02\%$ of total VLA FLOPs) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The budget head $g_\phi$ (for Stage~2 Budget RL):
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Component & Specification \\
+\midrule
+Input & Mean-pooled token features, $\bar{\mathbf{x}}_s \in \mathbb{R}^{2051}$ \\
+Layer 1 & LayerNorm(2051) $\to$ Linear(2051, 256) $\to$ GELU \\
+Layer 2 & Linear(256, 128) $\to$ GELU \\
+Layer 3 & Linear(128, 1) \\
+Output & Raw logit $u_s$; squashed to $k_s \in [0.2, 0.9]$ via \\
+       & $k_s = 0.2 + 0.7 \cdot \operatorname{sigmoid}(u_s)$ \\
+Total parameters & $\sim$0.01M (budget head only) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ============================================================================
+\section{Training Details}
+\label{sec:training}
+% ============================================================================
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Item & Value \\
+\midrule
+\multicolumn{2}{l}{\emph{Stage~1: LambdaRank scorer}} \\
+Training data & 4,000 navtrain scenes (80/20 train/val split) \\
+Optimizer & AdamW, $\mathrm{lr}=3\times10^{-4}$, weight decay $10^{-4}$ \\
+Schedule & Cosine decay to $10^{-5}$ \\
+Batch size & 64 scenes per batch, 1,024 token pairs per scene \\
+Max epochs & 20; early stopping patience 3 on validation pairwise accuracy \\
+\cmidrule(lr){1-2}
+\multicolumn{2}{l}{\emph{Stage~2: Budget RL (joint scorer + budget head)}} \\
+Init & Stage~1 LambdaRank scorer \\
+Epochs & 5 \\
+Checkpoint selected & Epoch 4, step 2,180 (by PDMS on 500-scene validation subset) \\
+Optimizer & AdamW \\
+Scorer learning rate & $1\times10^{-5}$ \\
+Budget head learning rate & $1\times10^{-4}$ \\
+Warmup steps & 100 \\
+Batch size & 32 scenes per step \\
+Group size $G$ & 8 scenes per group \\
+Budget samples $K$ per scene & 4 \\
+Policy std init & $\log\sigma_0 = -1.0$ \\
+Reward weights & $\lambda_d{=}2.0$, $\lambda_s{=}0.5$, $\lambda_e{=}0.15$ \\
+Scorer trust-region $\beta_{\mathrm{ref}}$ & 0.01 (weight-space $L_2$ anchor to SFT) \\
+Budget trust-region & None (budget head learns freely) \\
+Keep-ratio range & $[0.2, 0.9]$ \\
+Gradient sync & 8 workers, synchronized DDP \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Reward decomposition.} The driving reward $R_{\mathrm{drive}}$ weights the six NAVSIM
+sub-metrics with $w{=}(0.35,0.20,0.15,0.15,0.10,0.05)$ for (progress, collision, drivable, TTC,
+direction, comfort) and mixes absolute scores with per-scene pruning deltas with
+$(\alpha,\beta)=(0.3,0.7)$. The safety penalty $L_{\mathrm{safe}}$ penalizes harmful degradation
+on (collision, drivable, TTC) with weights $(0.4,0.3,0.3)$.
+
+\textbf{Training compute.} Stage~1: $\sim$4 GPU-hours on 1$\times$H20. Stage~2: $\sim$240
+GPU-hours on 8$\times$H20 (5 epochs $\times$ $\sim$6 hours/epoch). Each
+Stage~2 rollout requires one VLA forward pass per sampled budget action; with $G{=}8, K{=}4$ this
+yields $32$ rollouts per training step. Hardware: NVIDIA H20 (97\,GB VRAM).
+
+% ============================================================================
+\section{PDMS Sub-Metric Breakdown}
+\label{sec:submetrics}
+% ============================================================================
+
+Table~\ref{tab:submetrics} reports the full six-submetric breakdown for key configurations on the
+full navtest split ($N{=}11{,}576$, physical token removal).
+
+\begin{table}[h]
+\centering
+\caption{PDMS sub-metric breakdown on NAVSIM navtest ($N{=}11{,}576$). NC = no-at-fault collisions;
+DAC = drivable area compliance; EP = ego progress; TTC = time-to-collision.}
+\label{tab:submetrics}
+\small
+\begin{tabular}{@{}lccccccc@{}}
+\toprule
+Method & PDMS & NC & DAC & EP & TTC & Comfort & Direction \\
+\midrule
+No Prune ($r{=}1.0$) & 0.8988 & 0.994 & 0.960 & 0.833 & 0.977 & 0.999 & 0.981 \\
+\midrule
+\multicolumn{8}{l}{\emph{Retain 360 tokens ($r{=}0.5$, 33.6\% FLOPs reduction)}} \\
+SFT Scorer (ours, +fallback)  & \textbf{0.9045} & 0.987 & 0.956 & 0.809 & 0.971 & 0.998 & 0.979 \\
+\midrule
+\multicolumn{8}{l}{\emph{Dynamic (scene-adaptive)}} \\
+SFT + $\tau$-cut ($\sim$60\% keep) & 0.8949 & 0.994 & --- & 0.829 & --- & --- & --- \\
+Budget RL (35.5\% keep, +fallback) & \textbf{0.9107} & 0.994 & --- & 0.842 & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key observation:} At $r{=}0.5$, the SFT scorer with fallback achieves PDMS 0.9045,
+exceeding the unpruned baseline (0.8988). Budget RL further improves collision avoidance to 0.994
+while reducing mean token retention to 35.5\%.
+
+% ============================================================================
+\section{Dynamic Keep Ratio Distribution}
+\label{sec:distribution}
+% ============================================================================
+
+Table~\ref{tab:binned} reports the binned distribution of per-scene keep ratios produced by the
+Stage~2 Budget RL policy on the full navtest split. The budget head allocates keep ratios in
+$[0.20, 0.62]$ with mean 0.355 and standard deviation 0.12.
+
+\begin{table}[h]
+\centering
+\caption{Per-scene keep ratio distribution of Budget RL on navtest ($N{=}11{,}576$).}
+\label{tab:binned}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Keep ratio bin & Scenes & \% \\
+\midrule
+$[0.20, 0.30)$ & 5{,}176 & 44.7\% \\
+$[0.30, 0.40)$ & 1{,}717 & 14.8\% \\
+$[0.40, 0.50)$ & 2{,}290 & 19.8\% \\
+$[0.50, 0.62]$ & 2{,}393 & 20.7\% \\
+\midrule
+\textbf{Total} & \textbf{11{,}576} & \textbf{100\%} \\
+\midrule
+Scenes $<40\%$ retention & 6{,}893 & \textbf{59.5\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The budget head strongly skews toward aggressive pruning: 59.5\% of scenes retain fewer than 40\%
+of tokens, confirming that the learned policy discovers substantial redundancy in most driving
+scenes.
+
+% ============================================================================
+\section{$\tau$-cut Definition and Calibration}
+\label{sec:taucut}
+% ============================================================================
+
+The $\tau$-cut method provides a training-free scene-adaptive pruning baseline using the Stage~1
+SFT scorer. For each scene, we retain all tokens whose score exceeds a global threshold:
+\begin{equation}
+\mathcal{S}_s = \{i \mid f_\theta(\mathbf{x}_i) > \tau\},
+\qquad K_s = |\mathcal{S}_s|.
+\end{equation}
+
+The threshold $\tau$ is calibrated once on a held-out validation subset of navtrain:
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Tag & Target mean keep ratio & Calibrated $\tau$ \\
+\midrule
+kr040 & 40\% & $-0.1253$ \\
+kr050 & 50\% & $-0.1487$ \\
+kr060 & 60\% & $-0.1668$ \\
+kr070 & 70\% & $-0.1840$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The main paper reports kr060 (mean keep $\sim$60\%, PDMS 0.8949). Budget RL (Section~\ref{sec:training})
+learns a scene-conditional budget from reward feedback and achieves substantially lower mean
+retention (35.5\%) at higher PDMS (0.9107).
+
+% ============================================================================
+\section{Confidence-Based Runtime Fallback}
+\label{sec:fallback}
+% ============================================================================
+
+To guard against overly aggressive pruning on high-uncertainty scenes, we deploy a confidence-based
+runtime fallback that operates \emph{before} generation.
+
+\textbf{Confidence score.} For a scene with $N{=}720$ visual tokens and scorer logits
+$\{f_\theta(\mathbf{x}_i)\}_{i=1}^{N}$, we compute the normalized mean entropy:
+\begin{equation}
+H_s = -\frac{1}{\log N}\sum_{i=1}^{N} p_i\log p_i,\qquad
+p_i = \frac{\exp(f_\theta(\mathbf{x}_i))}{\sum_{j=1}^{N}\exp(f_\theta(\mathbf{x}_j))}.
+\end{equation}
+$H_s \in [0,1]$ measures the scorer's uncertainty: $H_s \approx 1$ means near-uniform scores (high
+uncertainty), while $H_s \approx 0$ means the scorer is confident about which tokens matter.
+
+\textbf{Fallback protocol.} If $H_s$ exceeds a calibrated threshold $\tau_{\mathrm{conf}}$, the
+scene is classified as high-uncertainty and the system falls back to full 720-token inference. The
+threshold is calibrated on the navtrain validation set to yield a fallback rate of approximately
+1--2\%. The fallback is an integral part of the deployment protocol and is reported explicitly in
+all ``ours'' rows of the main table.
+
+% ============================================================================
+\section{FLOPs Estimation}
+\label{sec:flops}
+% ============================================================================
+
+We estimate theoretical FLOPs for the AutoVLA-3B pipeline (Qwen2.5-VL-3B backbone). The ViT always
+processes all 720 vision tokens. Pruning occurs \emph{after} the ViT, so FLOPs savings are entirely
+in the LLM prefill (36 layers, hidden 2048, FFN 11008, 16 heads with GQA 2 KV heads).
+
+\textbf{Table of FLOPs by retention ratio:}
+\begin{center}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Retention & Vision kept & Seq.\ len & ViT (G) & LLM (G) & Total (G) & LLM saving \\
+\midrule
+100\% & 720 & 941 & 949.6 & 5482.8 & 6433.3 & --- \\
+75\%  & 540 & 761 & 949.6 & 4393.6 & 5344.1 & 19.9\% \\
+50\%  & 360 & 581 & 949.6 & 3323.6 & 4274.0 & 39.4\% \\
+35.5\% (ours) & 256 & $\sim$477 & 949.6 & $\sim$2698 & $\sim$3648 & $\sim$50.8\% \\
+25\%  & 180 & 401 & 949.6 & 2272.6 & 3223.1 & 58.6\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ============================================================================
+\section{Inference Latency Profile}
+\label{sec:latency}
+% ============================================================================
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Configuration & Latency (H20, AutoVLA-3B) \\
+\midrule
+No prune ($r{=}1.0$) & 2.16\,s per scene \\
+Pruned ($r{=}0.5$, physical drop) & 2.08\,s per scene (3.6\% wall-clock reduction) \\
+Scorer overhead & $<1$\,ms ($<0.05\%$ of inference time) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Note on wall-clock vs.\ FLOPs.} The 3.6\% wall-clock reduction at $r{=}0.5$ is limited by
+the small baseline model size and fixed I/O overhead. The theoretical FLOPs reduction of 33.6\% at
+$r{=}0.5$ and 43.3\% in the dynamic configuration translates to larger absolute savings on
+larger-scale models where prefill cost dominates.
+
+\end{document}

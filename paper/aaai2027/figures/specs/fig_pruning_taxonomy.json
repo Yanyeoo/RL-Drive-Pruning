@@ -1,0 +1,46 @@
+{
+  "title": "Visual Token Reduction Taxonomy and DriveToken Positioning",
+  "canvas": {"width": 620, "height": 1000},
+  "style": {"font_family": "Arial, Helvetica, sans-serif", "font_size": 14, "bg_color": "#FFFFFF", "palette": ["#EAF3FB", "#E6F5F0", "#FFF3D6", "#FDEBE5", "#F1EAFB"]},
+  "labels": [
+    {"text": "Visual Token Reduction: Selection Signal vs. Budget", "x": 310, "y": 34, "font_size": 20, "color": "#17365D", "anchor": "middle"},
+    {"text": "Existing methods differ in how they rank tokens and whether the retained count adapts to the input.", "x": 310, "y": 57, "font_size": 11, "color": "#526272", "anchor": "middle"},
+    {"text": "Selection signal", "x": 126, "y": 98, "font_size": 12, "color": "#526272", "anchor": "middle"},
+    {"text": "Token operation", "x": 310, "y": 98, "font_size": 12, "color": "#526272", "anchor": "middle"},
+    {"text": "Budget behavior", "x": 494, "y": 98, "font_size": 12, "color": "#526272", "anchor": "middle"},
+    {"text": "DriveToken's distinction is the optimization objective: planning-quality submetrics plus an explicit efficiency term.", "x": 310, "y": 958, "font_size": 11, "color": "#526272", "anchor": "middle"}
+  ],
+  "nodes": [
+    {"id": "imp_signal", "label": "Attention / text relevance\nor foreground saliency", "sublabel": "FastV · SparseVLM · FasterVLM · FastDriveVLA", "x": 126, "y": 222, "width": 196, "height": 70, "shape": "rounded", "fill": "#EAF3FB", "stroke": "#5089B7", "font_size": 14},
+    {"id": "imp_operation", "label": "Rank tokens\n→ Top-K", "sublabel": "importance / saliency pruning", "x": 310, "y": 222, "width": 150, "height": 70, "shape": "rounded", "fill": "#EAF3FB", "stroke": "#5089B7", "font_size": 14},
+    {"id": "imp_budget", "label": "Usually fixed K", "sublabel": "content-adaptive set; fixed count", "x": 494, "y": 222, "width": 190, "height": 70, "shape": "rounded", "fill": "#F7F9FB", "stroke": "#8092A3", "font_size": 14},
+    {"id": "sim_signal", "label": "Feature similarity,\ncoverage, or diversity", "sublabel": "PruMerge · VisionZip · DivPrune · TopV", "x": 126, "y": 440, "width": 196, "height": 70, "shape": "rounded", "fill": "#E6F5F0", "stroke": "#178579", "font_size": 14},
+    {"id": "sim_operation", "label": "Prune redundant\ntokens or merge them", "sublabel": "coverage-preserving compression", "x": 310, "y": 440, "width": 150, "height": 70, "shape": "rounded", "fill": "#E6F5F0", "stroke": "#178579", "font_size": 14},
+    {"id": "sim_budget", "label": "Fixed or adaptive", "sublabel": "PruMerge adapts count by input", "x": 494, "y": 440, "width": 190, "height": 70, "shape": "rounded", "fill": "#F7F9FB", "stroke": "#8092A3", "font_size": 14},
+    {"id": "learn_signal", "label": "Learned importance\npredictor", "sublabel": "ATP-LLaVA · Dynamic-LLaVA · GlimpsePrune", "x": 126, "y": 658, "width": 196, "height": 70, "shape": "rounded", "fill": "#F1EAFB", "stroke": "#8869B5", "font_size": 14},
+    {"id": "learn_operation", "label": "Predict relevance\n→ select tokens", "sublabel": "learned input-adaptive compression", "x": 310, "y": 658, "width": 150, "height": 70, "shape": "rounded", "fill": "#F1EAFB", "stroke": "#8869B5", "font_size": 14},
+    {"id": "learn_budget", "label": "Input-adaptive", "sublabel": "variable retained count", "x": 494, "y": 658, "width": 190, "height": 70, "shape": "rounded", "fill": "#F7F9FB", "stroke": "#8092A3", "font_size": 14},
+    {"id": "ours_input", "label": "Driving VLA tokens", "sublabel": "multi-view visual context", "x": 112, "y": 846, "width": 150, "height": 68, "shape": "rounded", "fill": "#FDEBE5", "stroke": "#C76F55", "font_size": 14},
+    {"id": "ours_scorer", "label": "Stage 1: scorer fθ", "sublabel": "which tokens to keep", "x": 278, "y": 846, "width": 150, "height": 68, "shape": "rounded", "fill": "#FDEBE5", "stroke": "#C76F55", "font_size": 14},
+    {"id": "ours_budget", "label": "Stage 2: budget gφ", "sublabel": "how many tokens to keep", "x": 444, "y": 846, "width": 150, "height": 68, "shape": "rounded", "fill": "#FDEBE5", "stroke": "#C76F55", "font_size": 14},
+    {"id": "ours_reward", "label": "Planning-quality reward + efficiency", "sublabel": "PDMS submetrics and token cost", "x": 310, "y": 910, "width": 310, "height": 56, "shape": "rounded", "fill": "#FFF3D6", "stroke": "#C08A18", "font_size": 14}
+  ],
+  "edges": [
+    {"from": "imp_signal", "to": "imp_operation", "color": "#5089B7", "thickness": 2},
+    {"from": "imp_operation", "to": "imp_budget", "color": "#5089B7", "thickness": 2},
+    {"from": "sim_signal", "to": "sim_operation", "color": "#178579", "thickness": 2},
+    {"from": "sim_operation", "to": "sim_budget", "color": "#178579", "thickness": 2},
+    {"from": "learn_signal", "to": "learn_operation", "color": "#8869B5", "thickness": 2},
+    {"from": "learn_operation", "to": "learn_budget", "color": "#8869B5", "thickness": 2},
+    {"from": "ours_input", "to": "ours_scorer", "color": "#C76F55", "thickness": 3},
+    {"from": "ours_scorer", "to": "ours_budget", "color": "#C76F55", "thickness": 3},
+    {"from": "ours_budget", "to": "ours_reward", "label": "selected tokens + budget", "color": "#C08A18", "thickness": 2, "curve": true},
+    {"from": "ours_reward", "to": "ours_budget", "label": "policy signal", "color": "#C08A18", "thickness": 2, "style": "dashed", "curve": true}
+  ],
+  "groups": [
+    {"id": "importance", "label": "(a) Importance / saliency-driven pruning", "node_ids": ["imp_signal", "imp_operation", "imp_budget"], "fill": "#F7FBFE", "stroke": "#A8C9E2", "padding": 18},
+    {"id": "similarity", "label": "(b) Similarity / diversity pruning and merging", "node_ids": ["sim_signal", "sim_operation", "sim_budget"], "fill": "#F5FCFA", "stroke": "#9FD8CF", "padding": 18},
+    {"id": "learned", "label": "(c) Learned input-adaptive compression", "node_ids": ["learn_signal", "learn_operation", "learn_budget"], "fill": "#FAF8FD", "stroke": "#C9B7E8", "padding": 18},
+    {"id": "ours", "label": "DriveToken: task-grounded selection and budget learning", "node_ids": ["ours_input", "ours_scorer", "ours_budget", "ours_reward"], "fill": "#FFF9F6", "stroke": "#E3A18F", "padding": 18}
+  ]
+}

@@ -30,25 +30,40 @@ Reference points: no-prune (`attn_L12` r=1.0) = **0.898845**; learned SFT scorer
 | `v10_value_only` | + value baseline only (max_kr 0.70) | 0.894235 | — | — |
 | `v10_floor_init` | + efficiency floor + kr init 0.65 (no value head) | 0.899157 | — | — |
 | `v10_full` | value baseline + floor + init 0.65 | 0.897519 | — | — |
-| **`v10_full_hi`** | value baseline + floor + init 0.70 + max_kr 0.85 | 0.899729 | **0.898274** | -0.000571 |
-| **`v11_hard50`** | `v10_full_hi` retrained on 50% hard + 50% normal scenes | 0.899520 | **0.898360** | -0.000485 |
-| `v11_hard50_kl` | same, `kl_beta` 0.02 | 0.898909 | — | — |
-| `v11_hard50_lr` | same, `budget_lr` 2e-4 | 0.898425 | — | — |
+| `v10_full_hi` | value baseline + floor + init 0.70 + max_kr 0.85 | 0.899729 | 0.898274 | -0.000571 |
+| `v11_hard50` | `v10_full_hi` retrained on 50% hard + 50% normal | 0.899520 | 0.898360 | -0.000485 |
+| **`v11_hard50_kl`** | same mix, `kl_beta` 0.02 (tighter token_net KL) | 0.898909 | **0.898719** | **-0.000126** |
+| `v11_hard50_lr` | same mix, `budget_lr` 2e-4 | 0.898425 | — | — |
 | `v11_hard75` | 75% hard scenes (over-weighted, worse generalization) | 0.897437 | — | — |
 
-**Honest status**: the best full-set score (`v11_hard50`, 0.898360) is still
-**-0.000485 below** the no-prune upper bound. `v10_full_hi` and `v11_hard50` are
-statistically level with no-prune and clearly above the supervised scorer, but
-neither beats no-prune on the full 4-shard split. `v11_hard50` reached 0.899520
-on the 2-shard gate (above no-prune) and did not hold up on the full set — see
-`STATUS.md` for the per-scene attribution of why.
+**Best checkpoint: `v11_hard50_kl` at 0.898719**, i.e. **-0.000126** from the
+no-prune upper bound — statistically level with it, but *not* above it. The gap
+narrowed across cycles (-0.000571 → -0.000485 → -0.000126) yet was never closed.
+
+Two things worth knowing before you trust the gate column:
+
+1. **Gate ranking inverted against full.** `v11_hard50` had the best 2-shard gate
+   score (0.899520, above no-prune) but lost to `v11_hard50_kl` on the full
+   4-shard set. Always conclude on full.
+2. **`v11_hard50_kl` wins by losing less, not by rescuing more.** Per-scene
+   attribution over the aligned 11572 scenes: catastrophic scenes are 82
+   (`hard50`) vs 83 (`hard50_kl`) — essentially identical — while the count of
+   scenes that *beat* no-prune is 550 vs 606 (baseline `v10_full_hi`: 639).
+   Raising `keep_ratio` globally buys safety on dangerous scenes at the cost of
+   the pruning gains everywhere else; tightening the KL on `token_net` preserves
+   the supervised token ranking and gives most of that back. Note `hard50_kl`'s
+   keep_ratio barely moved (0.691 → 0.686) yet it scored best — training reward
+   and keep_ratio are *not* reliable model-selection signals here.
+
+See `STATUS.md` for the full attribution and the resulting v12 direction.
 
 ## Efficiency
 
-`v11_hard50` settles at `keep_ratio ≈ 0.75`, `v10_full_hi` at `≈ 0.72`
-(keep ~518 of 720 vision tokens). At r=0.72 the theoretical saving is
-**-19.0% total FLOPs / -22.3% LLM prefill** (`scripts/compute_flops_table.py`;
-the ViT cost of 949.6G is constant and only LLM prefill shrinks).
+`v11_hard50_kl` settles at `keep_ratio ≈ 0.69`, `v11_hard50` at `≈ 0.75` and
+`v10_full_hi` at `≈ 0.72` (keeping ~500-540 of 720 vision tokens). At r=0.72 the
+theoretical saving is **-19.0% total FLOPs / -22.3% LLM prefill**
+(`scripts/compute_flops_table.py`; the ViT cost of 949.6G is constant and only
+LLM prefill shrinks).
 Measured wall-clock latency is **not yet verified** — `scripts/profile_wallclock.py`
 still fails at trajectory decoding; treat the FLOPs number as theoretical.
 
@@ -57,7 +72,8 @@ still fails at trajectory decoding; treat the FLOPs number as theoretical.
 ```python
 from rldrive.scoring.token_scorer_budget import BudgetScorerRunner
 
-runner = BudgetScorerRunner("release_ckpt/v11_hard50", device="cuda:0")
+# v11_hard50_kl is the best checkpoint (full 4-shard 0.898719)
+runner = BudgetScorerRunner("release_ckpt/v11_hard50_kl", device="cuda:0")
 token_scores, keep_ratio = runner.score_budget(
     vision_feat, vision_token_positions, vision_blocks
 )

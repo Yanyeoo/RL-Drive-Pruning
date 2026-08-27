@@ -27,6 +27,13 @@ pretrained/
 *.npy
 *.npz
 
+# ---------- EXCEPTION: published experiment artifacts ----------
+# Small, load-bearing outputs that must survive node reclamation: the v11
+# mining deltas (2.6 GPU-hours, reused by the next cycle) and the per-scene
+# eval CSVs that the reported PDMS numbers are computed from.
+!artifacts/
+!artifacts/**
+
 # ---------- EXCEPTION: our own trained scorer weights (release artifacts) ----------
 # The token scorer + budget head is a 0.6M-param MLP: ~6.6MB per checkpoint.
 # These are OUR training products and are small enough to ship in-repo so that
